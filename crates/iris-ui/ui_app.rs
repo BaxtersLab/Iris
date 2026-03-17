@@ -1,5 +1,5 @@
 use eframe::egui::{self, CentralPanel, ScrollArea, TopBottomPanel};
-use eframe::egui::{ColorImage, TextureHandle, Key};
+use eframe::egui::{ColorImage, TextureHandle, Key, Color32, Stroke};
 use iris_capture::frame::CaptureFrame;
 use iris_capture::service::CaptureHandle;
 use iris_ipc::command::IpcCommand;
@@ -121,6 +121,12 @@ impl eframe::App for IrisApp {
                         let _ = ipc.send_command(IpcCommand::StartCapture).await;
                     });
                 }
+                // Visual focus outline if widget has keyboard focus
+                if start_resp.has_focus() {
+                    let rect = start_resp.rect;
+                    let stroke = Stroke::new(2.0, Color32::from_rgb(0, 120, 215));
+                    ui.painter().rect_stroke(rect, 4.0, stroke);
+                }
 
                 let stop_resp = ui
                     .add_enabled(true, egui::Button::new("Stop Capture"))
@@ -132,6 +138,11 @@ impl eframe::App for IrisApp {
                     tokio::spawn(async move {
                         let _ = ipc.send_command(IpcCommand::StopCapture).await;
                     });
+                }
+                if stop_resp.has_focus() {
+                    let rect = stop_resp.rect;
+                    let stroke = Stroke::new(2.0, Color32::from_rgb(0, 120, 215));
+                    ui.painter().rect_stroke(rect, 4.0, stroke);
                 }
             });
         });
@@ -157,6 +168,11 @@ impl eframe::App for IrisApp {
                                 }
                             }
                         });
+                    }
+                    if refresh_resp.has_focus() {
+                        let rect = refresh_resp.rect;
+                        let stroke = Stroke::new(2.0, Color32::from_rgb(0, 120, 215));
+                        ui.painter().rect_stroke(rect, 4.0, stroke);
                     }
 
                     ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
