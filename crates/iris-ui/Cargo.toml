@@ -29,3 +29,11 @@ egui = "0.27"
 tray-icon = "0.13"
 global-hotkey = "0.4"
 tracing-subscriber = "0.3"
+reqwest = { version = "0.11", features = ["blocking", "rustls-tls"] }
+hyper = { version = "0.14", features = ["full"] }
+windows-sys = { version = "0.48", optional = true }
+widestring = { version = "0.5", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = "0.48"
+widestring = "0.5"

@@ -9,6 +9,12 @@ use iris_hal::backend::{MockUvcBackend, UvcBackend};
 use iris_hrt::service::{HrtConfig, HrtService};
 use iris_ipc::telemetry::{TelemetryEnvelope, TelemetryEvent};
 use iris_ipc::{response::IpcResponse, response::ResponseData, IpcHandle, IpcServer};
+use hyper::service::{make_service_fn, service_fn};
+use hyper::{Body, Request, Response, Server};
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use iris_core::pipeline::prometheus_text;
+use tracing::info;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -154,6 +160,19 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                     let _ = cmd_sender.send(CaptureCommand::Stop).await;
                     IpcResponse::Ok(ResponseData::Empty)
                 }
+                IpcCommand::ForceRebase => {
+                    // Trigger an in-process rebase increment for diagnostics/tests
+                    iris_core::pipeline::force_increment_rebase_for_test();
+                    IpcResponse::Ok(ResponseData::Empty)
+                }
+                IpcCommand::ShowUi => {
+                    // Attempt to bring the Iris window to the foreground on Windows.
+                    #[cfg(windows)]
+                    {
+                        crate::win32::bring_iris_to_front();
+                    }
+                    IpcResponse::Ok(ResponseData::Empty)
+                }
                 _ => IpcResponse::Ok(ResponseData::Empty),
             }
         })
@@ -211,10 +230,13 @@ impl IrisRuntime {
                 ))
             };
 
+        // Create an external frame sender for possible consumers (encoder, tests).
+        let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(capture_cfg.max_queue_depth);
         let (capture_service, capture_handle) = CaptureService::new(
             boxed_backend,
             capture_cfg.clone(),
             capture_telemetry_tx.clone(),
+            frame_tx,
         );
 
         // create the capture command channel that will be used by the dispatcher
@@ -225,6 +247,49 @@ impl IrisRuntime {
 
         // 6. Spawn services
         let mut tasks = Vec::new();
+
+        // Spawn a minimal HTTP server to expose /metrics and a debug endpoint
+        // `/debug/force_rebase` which triggers an in-process rebase increment.
+        // Binding address can be configured via METRICS_BIND (default 127.0.0.1:9180).
+        let metrics_bind = std::env::var("METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9180".to_string());
+        if let Ok(addr) = metrics_bind.parse::<SocketAddr>() {
+            let svc = make_service_fn(|_conn| async move {
+                Ok::<_, Infallible>(service_fn(|req: Request<Body>| async move {
+                    match req.uri().path() {
+                        "/metrics" => {
+                            let body = prometheus_text();
+                            Ok::<_, Infallible>(
+                                Response::builder()
+                                    .status(200)
+                                    .header("content-type", "text/plain; version=0.0.4")
+                                    .body(Body::from(body))
+                                    .unwrap(),
+                            )
+                        }
+                        "/debug/force_rebase" => {
+                            iris_core::pipeline::force_increment_rebase_for_test();
+                            Ok::<_, Infallible>(
+                                Response::builder()
+                                    .status(200)
+                                    .body(Body::from("ok"))
+                                    .unwrap(),
+                            )
+                        }
+                        _ => Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(404)
+                                .body(Body::from("not found"))
+                                .unwrap(),
+                        ),
+                    }
+                }))
+            });
+            tokio::spawn(async move {
+                let _ = Server::bind(&addr).serve(svc).await;
+            });
+        } else {
+            println!("Invalid METRICS_BIND '{}', skipping metrics HTTP server", metrics_bind);
+        }
         tasks.push(tokio::spawn(async move {
             ipc_server.run_with_dispatcher(dispatcher).await
         }));

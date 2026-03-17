@@ -3,6 +3,7 @@
 
 pub mod bootstrap;
 pub mod ui_app;
+pub mod win32;
 
 pub fn ui_version() -> &'static str {
     "iris-ui 0.1.0"
