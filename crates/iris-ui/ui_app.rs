@@ -102,7 +102,7 @@ impl eframe::App for IrisApp {
         TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Iris — Mock UI");
-                ui.label("(Keyboard: S=start, T=stop, R=refresh devices)");
+                ui.label("(Keyboard: S=start, T=stop, R=refresh devices)  Tab order: [1] Start  [2] Stop  [3] Refresh");
 
                 // Enable Start only when a device is selected
                 let has_device = match self.selected_device.lock() {
@@ -113,7 +113,9 @@ impl eframe::App for IrisApp {
                 let start_resp = ui
                     .add_enabled(has_device, egui::Button::new("Start Capture"))
                     .on_hover_text(if has_device { "Start camera capture" } else { "Select a device first" });
+                ui.label("[1]");
                 if start_resp.clicked() {
+                    start_resp.request_focus();
                     let ipc = Arc::clone(&self.ipc);
                     tokio::spawn(async move {
                         let _ = ipc.send_command(IpcCommand::StartCapture).await;
@@ -123,7 +125,9 @@ impl eframe::App for IrisApp {
                 let stop_resp = ui
                     .add_enabled(true, egui::Button::new("Stop Capture"))
                     .on_hover_text("Stop camera capture");
+                ui.label("[2]");
                 if stop_resp.clicked() {
+                    stop_resp.request_focus();
                     let ipc = Arc::clone(&self.ipc);
                     tokio::spawn(async move {
                         let _ = ipc.send_command(IpcCommand::StopCapture).await;
@@ -136,7 +140,12 @@ impl eframe::App for IrisApp {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.heading("Devices");
-                    if ui.button("Refresh").on_hover_text("Refresh device list (or press R)").clicked() {
+                    let refresh_resp = ui
+                        .button("Refresh")
+                        .on_hover_text("Refresh device list (or press R)");
+                    ui.label("[3]");
+                    if refresh_resp.clicked() {
+                        refresh_resp.request_focus();
                         let ipc = Arc::clone(&self.ipc);
                         let devices_ref = self.devices.clone();
                         tokio::spawn(async move {
