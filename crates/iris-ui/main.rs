@@ -67,7 +67,16 @@ async fn main() {
             let _ = eframe::run_native(
                 "Iris",
                 options,
-                Box::new(move |_cc| {
+                Box::new(move |cc| {
+                    // Apply a charcoal/dark visuals and white text on creation
+                    let ctx = &cc.egui_ctx;
+                    let mut visuals = egui::Visuals::dark();
+                    // Charcoal background
+                    visuals.window_fill = egui::Color32::from_rgb(45, 48, 52);
+                    visuals.panel_fill = egui::Color32::from_rgb(45, 48, 52);
+                    visuals.override_text_color = Some(egui::Color32::WHITE);
+                    ctx.set_visuals(visuals);
+
                     Box::new(iris_ui::ui_app::IrisApp::new(ipc.clone(), capture_handle))
                 }),
             );

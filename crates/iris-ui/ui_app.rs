@@ -1,5 +1,5 @@
 use eframe::egui::{self, CentralPanel, ScrollArea, TopBottomPanel};
-use eframe::egui::{ColorImage, TextureHandle, Key, Color32, Stroke};
+use eframe::egui::{ColorImage, TextureHandle, Key, Color32, Stroke, Rounding};
 use iris_capture::frame::CaptureFrame;
 use iris_capture::service::CaptureHandle;
 use iris_ipc::command::IpcCommand;
@@ -20,6 +20,8 @@ pub struct IrisApp {
     // When capture_rx is closed, give it a short grace period before dropping
     // the receiver so transient races do not remove the preview permanently.
     capture_rx_deadline: Option<std::time::Instant>,
+    // Track whether we've set the window size once on startup
+    did_set_window_size: bool,
 }
 
 impl IrisApp {
@@ -35,6 +37,7 @@ impl IrisApp {
             capture_rx: Some(capture.frame_rx),
             preview_texture: None,
             capture_rx_deadline: None,
+            did_set_window_size: false,
         };
 
         // fetch initial device list
@@ -56,6 +59,14 @@ impl IrisApp {
 
 impl eframe::App for IrisApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Ensure window size is set once to requested small-mid dimensions (Windows)
+        if !self.did_set_window_size {
+            #[cfg(windows)]
+            {
+                crate::win32::set_iris_window_size(500, 400);
+            }
+            self.did_set_window_size = true;
+        }
         // drain any telemetry messages into a temporary buffer, then append to log
         let mut new_entries: Vec<String> = Vec::new();
         if let Ok(mut rx) = self.telemetry_rx.lock() {
@@ -124,8 +135,8 @@ impl eframe::App for IrisApp {
                 // Visual focus outline if widget has keyboard focus
                 if start_resp.has_focus() {
                     let rect = start_resp.rect;
-                    let stroke = Stroke::new(2.0, Color32::from_rgb(0, 120, 215));
-                    ui.painter().rect_stroke(rect, 4.0, stroke);
+                    let stroke = Stroke::new(1.0, Color32::BLACK);
+                    ui.painter().rect_stroke(rect, Rounding::same(4.0), stroke);
                 }
 
                 let stop_resp = ui
@@ -141,8 +152,8 @@ impl eframe::App for IrisApp {
                 }
                 if stop_resp.has_focus() {
                     let rect = stop_resp.rect;
-                    let stroke = Stroke::new(2.0, Color32::from_rgb(0, 120, 215));
-                    ui.painter().rect_stroke(rect, 4.0, stroke);
+                    let stroke = Stroke::new(1.0, Color32::BLACK);
+                    ui.painter().rect_stroke(rect, Rounding::same(4.0), stroke);
                 }
             });
         });
@@ -171,8 +182,8 @@ impl eframe::App for IrisApp {
                     }
                     if refresh_resp.has_focus() {
                         let rect = refresh_resp.rect;
-                        let stroke = Stroke::new(2.0, Color32::from_rgb(0, 120, 215));
-                        ui.painter().rect_stroke(rect, 4.0, stroke);
+                        let stroke = Stroke::new(1.0, Color32::BLACK);
+                        ui.painter().rect_stroke(rect, Rounding::same(4.0), stroke);
                     }
 
                     ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
