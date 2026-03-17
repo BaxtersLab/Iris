@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 pub struct IrisApp {
     ipc: Arc<IpcHandle>,
     telemetry_rx: Mutex<LoggedTelemetryReceiver>,
-    log: Mutex<Vec<String>>,
+    log: Arc<Mutex<Vec<String>>>,
     devices: Arc<Mutex<Vec<DeviceEntry>>>,
     selected_device: Arc<Mutex<Option<String>>>,
     last_frame_info: Arc<Mutex<Option<(u32, u32)>>>,
@@ -24,6 +24,9 @@ pub struct IrisApp {
     did_set_window_size: bool,
     // Whether capture is currently active (used to highlight Start button)
     is_capturing: bool,
+    // (thumbnail fields removed; preview-only)
+    // Last time cameras were scanned and result summary
+    last_scan_summary: Arc<Mutex<String>>,
 }
 
 impl IrisApp {
@@ -32,7 +35,7 @@ impl IrisApp {
         let app = Self {
             ipc: ipc.clone(),
             telemetry_rx: Mutex::new(telemetry_rx),
-            log: Mutex::new(Vec::new()),
+            log: Arc::new(Mutex::new(Vec::new())),
             devices: Arc::new(Mutex::new(Vec::new())),
             selected_device: Arc::new(Mutex::new(None)),
             last_frame_info: Arc::new(Mutex::new(None)),
@@ -41,17 +44,43 @@ impl IrisApp {
             capture_rx_deadline: None,
             did_set_window_size: false,
             is_capturing: false,
+            last_scan_summary: Arc::new(Mutex::new("Not scanned yet".to_string())),
         };
 
-        // fetch initial device list
+        // fetch initial device list and auto-select the first device if present
         let ipc_clone = ipc.clone();
         let devices_ref = app.devices.clone();
+        let selected_ref = app.selected_device.clone();
         tokio::spawn(async move {
             if let Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) =
                 ipc_clone.send_command(IpcCommand::ListDevices).await
             {
                 if let Ok(mut dv) = devices_ref.lock() {
-                    *dv = devices;
+                    *dv = devices.clone();
+                }
+                if !devices.is_empty() {
+                    // Prefer a real camera device over mock/virtual ones
+                    let mut chosen: Option<String> = None;
+                    for d in devices.iter() {
+                        let name = d.name.to_lowercase();
+                        if !(name.contains("mock") || name.contains("virtual") || name.contains("loopback")) {
+                            chosen = Some(d.id.clone());
+                            break;
+                        }
+                    }
+                    let first_id = chosen.unwrap_or_else(|| devices[0].id.clone());
+                    // attempt to tell the backend to select the device
+                    let _ = ipc_clone
+                        .send_command(IpcCommand::SelectDevice { device_id: first_id.clone() })
+                        .await;
+                    if let Ok(mut s) = selected_ref.lock() {
+                        *s = Some(first_id.clone());
+                    }
+                    // Kick off capture automatically when a physical device was selected
+                    // (backend may ignore if selection failed)
+                    let _ = ipc_clone.send_command(IpcCommand::StartCapture).await;
+                    // mark UI capturing state so Start button highlights appropriately
+                    // Note: we can't mutate self here because we're in a spawned task; rely on telemetry
                 }
             }
         });
@@ -172,52 +201,103 @@ impl eframe::App for IrisApp {
         CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.heading("Devices");
-                    let refresh_resp = ui
-                        .button("Refresh")
-                        .on_hover_text("Refresh device list (or press R)");
+                    ui.heading("Cameras");
+                    let scan_resp = ui
+                        .button("Detect Cameras")
+                        .on_hover_text("Scan for physical cameras (or press R)");
                     ui.label("[3]");
-                    if refresh_resp.clicked() {
-                        refresh_resp.request_focus();
+                    if scan_resp.clicked() {
+                        scan_resp.request_focus();
                         let ipc = Arc::clone(&self.ipc);
                         let devices_ref = self.devices.clone();
+                        let summary_ref = self.last_scan_summary.clone();
+                        let log_ref = self.log.clone();
                         tokio::spawn(async move {
-                            if let Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) =
-                                ipc.send_command(IpcCommand::ListDevices).await
-                            {
-                                if let Ok(mut dv) = devices_ref.lock() {
-                                    *dv = devices;
+                            match ipc.send_command(IpcCommand::ListDevices).await {
+                                Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) => {
+                                    let count = devices.len();
+                                    let names: Vec<String> = devices.iter().map(|d| d.name.clone()).collect();
+                                    let summary = format!("Found {} device(s): {}", count, names.join(", "));
+                                    println!("Detect Cameras: {}", summary);
+                                    if let Ok(mut lg) = log_ref.lock() {
+                                        lg.push(format!("[Scan] {}", summary));
+                                    }
+                                    if let Ok(mut s) = summary_ref.lock() {
+                                        *s = summary;
+                                    }
+                                    if let Ok(mut dv) = devices_ref.lock() {
+                                        *dv = devices;
+                                    }
                                 }
+                                Err(e) => {
+                                    let msg = format!("Scan error: {:?}", e);
+                                    println!("Detect Cameras: {}", msg);
+                                    if let Ok(mut lg) = log_ref.lock() {
+                                        lg.push(format!("[Scan] {}", msg));
+                                    }
+                                    if let Ok(mut s) = summary_ref.lock() {
+                                        *s = msg;
+                                    }
+                                }
+                                _ => {}
                             }
                         });
                     }
-                    if refresh_resp.has_focus() {
-                        let rect = refresh_resp.rect;
+                    if scan_resp.has_focus() {
+                        let rect = scan_resp.rect;
                         let stroke = Stroke::new(1.0, Color32::BLACK);
                         ui.painter().rect_stroke(rect, Rounding::same(4.0), stroke);
                     }
 
+                    // Show last scan result
+                    if let Ok(s) = self.last_scan_summary.lock() {
+                        ui.label(egui::RichText::new(s.as_str()).small().weak());
+                    }
+
                     ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                         if let Ok(dv) = self.devices.lock() {
-                            for dev in dv.iter() {
-                                ui.horizontal(|ui| {
-                                    ui.label(&dev.name);
-                                    if ui.button("Select").clicked() {
-                                        let ipc = Arc::clone(&self.ipc);
-                                        let id = dev.id.clone();
-                                        let sel = self.selected_device.clone();
-                                        tokio::spawn(async move {
-                                            let _ = ipc
-                                                .send_command(IpcCommand::SelectDevice {
-                                                    device_id: id.clone(),
-                                                })
-                                                .await;
-                                            if let Ok(mut s) = sel.lock() {
-                                                *s = Some(id);
-                                            }
-                                        });
-                                    }
-                                });
+                            // Filter out mock/virtual; show all real cameras
+                            let real_devices: Vec<&DeviceEntry> = dv
+                                .iter()
+                                .filter(|d| {
+                                    let lname = d.name.to_lowercase();
+                                    !(d.id.starts_with("mock") || lname.contains("mock") || lname.contains("virtual") || lname.contains("loopback"))
+                                })
+                                .collect();
+
+                            if real_devices.is_empty() {
+                                ui.label(egui::RichText::new("No cameras detected — click Detect Cameras").italics().weak());
+                            } else {
+                                for dev in real_devices.iter() {
+                                    ui.horizontal(|ui| {
+                                        // Highlight if currently selected
+                                        let is_selected = match self.selected_device.lock() {
+                                            Ok(s) => s.as_deref() == Some(dev.id.as_str()),
+                                            Err(_) => false,
+                                        };
+                                        let label = if is_selected {
+                                            egui::RichText::new(format!("\u{25CF} {}", dev.name)).color(Color32::from_rgb(76, 175, 80))
+                                        } else {
+                                            egui::RichText::new(&dev.name)
+                                        };
+                                        ui.label(label);
+                                        if ui.button("Select").clicked() {
+                                            let ipc = Arc::clone(&self.ipc);
+                                            let id = dev.id.clone();
+                                            let sel = self.selected_device.clone();
+                                            tokio::spawn(async move {
+                                                let _ = ipc
+                                                    .send_command(IpcCommand::SelectDevice {
+                                                        device_id: id.clone(),
+                                                    })
+                                                    .await;
+                                                if let Ok(mut s) = sel.lock() {
+                                                    *s = Some(id);
+                                                }
+                                            });
+                                        }
+                                    });
+                                }
                             }
                         }
                     });
@@ -283,6 +363,8 @@ impl eframe::App for IrisApp {
                                         if let Ok(mut lf) = self.last_frame_info.lock() {
                                             *lf = Some((frame.width, frame.height));
                                         }
+
+                                        // (thumbnail generation removed) keep only the main preview texture
                                     }
                                 }
                                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
@@ -309,9 +391,11 @@ impl eframe::App for IrisApp {
                         let size = tex.size();
                         let w = size[0] as f32;
                         let h = size[1] as f32;
+                        let max_w = 320.0;
+                        let max_h = 180.0;
                         ui.add(
                             egui::Image::new(tex)
-                                .fit_to_exact_size(egui::vec2(w.min(640.0), h.min(360.0))),
+                                .fit_to_exact_size(egui::vec2(w.min(max_w), h.min(max_h))),
                         );
                     } else if let Ok(lf) = self.last_frame_info.lock() {
                         if let Some((w, h)) = *lf {
@@ -359,13 +443,24 @@ impl eframe::App for IrisApp {
             if input.key_pressed(Key::R) {
                 let ipc = Arc::clone(&self.ipc);
                 let devices_ref = self.devices.clone();
+                let summary_ref = self.last_scan_summary.clone();
+                let log_ref = self.log.clone();
                 tokio::spawn(async move {
-                    if let Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) =
-                        ipc.send_command(IpcCommand::ListDevices).await
-                    {
-                        if let Ok(mut dv) = devices_ref.lock() {
-                            *dv = devices;
+                    match ipc.send_command(IpcCommand::ListDevices).await {
+                        Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) => {
+                            let count = devices.len();
+                            let names: Vec<String> = devices.iter().map(|d| d.name.clone()).collect();
+                            let summary = format!("Found {} device(s): {}", count, names.join(", "));
+                            if let Ok(mut lg) = log_ref.lock() { lg.push(format!("[Scan] {}", summary)); }
+                            if let Ok(mut s) = summary_ref.lock() { *s = summary; }
+                            if let Ok(mut dv) = devices_ref.lock() { *dv = devices; }
                         }
+                        Err(e) => {
+                            let msg = format!("Scan error: {:?}", e);
+                            if let Ok(mut lg) = log_ref.lock() { lg.push(format!("[Scan] {}", msg)); }
+                            if let Ok(mut s) = summary_ref.lock() { *s = msg; }
+                        }
+                        _ => {}
                     }
                 });
             }

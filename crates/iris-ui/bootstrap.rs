@@ -14,7 +14,6 @@ use hyper::{Body, Request, Response, Server};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use iris_core::pipeline::prometheus_text;
-use tracing::info;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -68,23 +67,39 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                     IpcResponse::Ok(status)
                 }
                 IpcCommand::ListDevices => {
-                    // Query mock backend directly for devices
-                    let backend = MockUvcBackend::new();
-                    match backend.enumerate_devices().await {
-                        Ok(list) => {
-                            let devices = list
-                                .into_iter()
-                                .map(|d| iris_ipc::response::DeviceEntry {
-                                    id: d.id.0.clone(),
-                                    name: d.name.clone(),
-                                    vendor: "Iris".to_string(),
-                                    resolutions: vec![],
-                                })
-                                .collect();
-                            IpcResponse::Ok(ResponseData::DeviceList { devices })
+                    // On Windows, try WMF enumeration first for real USB cameras;
+                    // fall back to the mock backend if WMF returns an error or nothing.
+                    #[cfg(windows)]
+                    let raw_list = {
+                        let wmf_result = iris_hal::wmf_backend::wmf::WmfUvcBackend::enumerate_sync();
+                        match wmf_result {
+                            Ok(list) if !list.is_empty() => {
+                                println!("ListDevices: WMF found {} device(s)", list.len());
+                                list
+                            }
+                            Ok(_) => {
+                                println!("ListDevices: WMF returned 0 devices, falling back to mock");
+                                MockUvcBackend::new().enumerate_devices().await.unwrap_or_default()
+                            }
+                            Err(e) => {
+                                println!("ListDevices: WMF error ({:?}), falling back to mock", e);
+                                MockUvcBackend::new().enumerate_devices().await.unwrap_or_default()
+                            }
                         }
-                        Err(_) => IpcResponse::Ok(ResponseData::DeviceList { devices: vec![] }),
-                    }
+                    };
+                    #[cfg(not(windows))]
+                    let raw_list = MockUvcBackend::new().enumerate_devices().await.unwrap_or_default();
+
+                    let devices = raw_list
+                        .into_iter()
+                        .map(|d| iris_ipc::response::DeviceEntry {
+                            id: d.id.0.clone(),
+                            name: d.name.clone(),
+                            vendor: "Iris".to_string(),
+                            resolutions: vec![],
+                        })
+                        .collect();
+                    IpcResponse::Ok(ResponseData::DeviceList { devices })
                 }
                 IpcCommand::ResumeCapture => {
                     let _ = cmd_sender.send(CaptureCommand::Resume).await;
