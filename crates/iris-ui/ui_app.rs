@@ -1,5 +1,5 @@
 use eframe::egui::{self, CentralPanel, ScrollArea, TopBottomPanel};
-use eframe::egui::{ColorImage, TextureHandle};
+use eframe::egui::{ColorImage, TextureHandle, Key};
 use iris_capture::frame::CaptureFrame;
 use iris_capture::service::CaptureHandle;
 use iris_ipc::command::IpcCommand;
@@ -102,6 +102,7 @@ impl eframe::App for IrisApp {
         TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Iris — Mock UI");
+                ui.label("(Keyboard: S=start, T=stop, R=refresh devices)");
 
                 // Enable Start only when a device is selected
                 let has_device = match self.selected_device.lock() {
@@ -135,7 +136,7 @@ impl eframe::App for IrisApp {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.heading("Devices");
-                    if ui.button("Refresh").clicked() {
+                    if ui.button("Refresh").on_hover_text("Refresh device list (or press R)").clicked() {
                         let ipc = Arc::clone(&self.ipc);
                         let devices_ref = self.devices.clone();
                         tokio::spawn(async move {
@@ -285,6 +286,42 @@ impl eframe::App for IrisApp {
                     }
                 }
             });
+        });
+
+        // Keyboard shortcuts for accessibility: allow quick Start/Stop/Refresh
+        // S = Start (when device selected), T = Stop, R = Refresh devices
+        ctx.input(|input| {
+            if input.key_pressed(Key::S) {
+                let has_device = match self.selected_device.lock() {
+                    Ok(g) => g.is_some(),
+                    Err(_) => false,
+                };
+                if has_device {
+                    let ipc = Arc::clone(&self.ipc);
+                    tokio::spawn(async move {
+                        let _ = ipc.send_command(IpcCommand::StartCapture).await;
+                    });
+                }
+            }
+            if input.key_pressed(Key::T) {
+                let ipc = Arc::clone(&self.ipc);
+                tokio::spawn(async move {
+                    let _ = ipc.send_command(IpcCommand::StopCapture).await;
+                });
+            }
+            if input.key_pressed(Key::R) {
+                let ipc = Arc::clone(&self.ipc);
+                let devices_ref = self.devices.clone();
+                tokio::spawn(async move {
+                    if let Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) =
+                        ipc.send_command(IpcCommand::ListDevices).await
+                    {
+                        if let Ok(mut dv) = devices_ref.lock() {
+                            *dv = devices;
+                        }
+                    }
+                });
+            }
         });
     }
 }
