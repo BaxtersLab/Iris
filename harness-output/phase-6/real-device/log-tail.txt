@@ -1,0 +1,200 @@
+﻿Dispatcher: send-start ts=2026-03-17 22:47:43.742655 UTC sequence=21 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:43.742800600 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:43.742951700 UTC sequence=20 event=FrameCaptured { sequence: 21, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:43.743100500 UTC sequence=21 event=FrameCaptured { sequence: 22, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:44.034311 UTC frames_captured=23 roi_active=false receivers=3
+CapDebug: recv frames=22 roi=false resolution=3840x2160
+CapDebug: recv frames=23 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:44.370168900 UTC frames_captured=24 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=23 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:44.389074700 UTC seq=22 queue_len=1
+Forwarder: received capture telemetry frames=24 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:44.389370200 UTC seq=23 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:44.389529200 UTC sequence=22 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:44.389677100 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:44.389825500 UTC sequence=23 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:44.389968800 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:44.390119700 UTC sequence=22 event=FrameCaptured { sequence: 23, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:44.390360600 UTC sequence=23 event=FrameCaptured { sequence: 24, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:44.707483200 UTC frames_captured=25 roi_active=false receivers=3
+CapDebug: recv frames=24 roi=false resolution=3840x2160
+CapDebug: recv frames=25 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:45.012880900 UTC frames_captured=26 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=25 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:45.031983 UTC seq=24 queue_len=1
+Forwarder: received capture telemetry frames=26 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:45.032284500 UTC seq=25 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:45.032443400 UTC sequence=24 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:45.032595200 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:45.032745 UTC sequence=25 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:45.032905100 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:45.033057600 UTC sequence=24 event=FrameCaptured { sequence: 25, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:45.033206800 UTC sequence=25 event=FrameCaptured { sequence: 26, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:45.329145 UTC frames_captured=27 roi_active=false receivers=3
+CapDebug: recv frames=26 roi=false resolution=3840x2160
+CapDebug: recv frames=27 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:45.642927400 UTC frames_captured=28 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=27 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:45.661844900 UTC seq=26 queue_len=1
+Forwarder: received capture telemetry frames=28 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:45.662148300 UTC seq=27 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:45.662311300 UTC sequence=26 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:45.662464300 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:45.662625600 UTC sequence=27 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:45.662771900 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:45.662924500 UTC sequence=26 event=FrameCaptured { sequence: 27, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:45.663073600 UTC sequence=27 event=FrameCaptured { sequence: 28, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:45.952554700 UTC frames_captured=29 roi_active=false receivers=3
+CapDebug: recv frames=28 roi=false resolution=3840x2160
+CapDebug: recv frames=29 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:46.276594300 UTC frames_captured=30 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=29 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:46.296224400 UTC seq=28 queue_len=1
+Forwarder: received capture telemetry frames=30 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:46.296524400 UTC seq=29 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:46.296684300 UTC sequence=28 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:46.296878800 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:46.297027600 UTC sequence=29 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:46.297319800 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:46.297493200 UTC sequence=28 event=FrameCaptured { sequence: 29, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:46.297802 UTC sequence=29 event=FrameCaptured { sequence: 30, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:46.593725900 UTC frames_captured=31 roi_active=false receivers=3
+CapDebug: recv frames=30 roi=false resolution=3840x2160
+CapDebug: recv frames=31 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:46.919755300 UTC frames_captured=32 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=31 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:46.938929300 UTC seq=30 queue_len=1
+Forwarder: received capture telemetry frames=32 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:46.939305100 UTC seq=31 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:46.939465100 UTC sequence=30 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:46.939696600 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:46.939948100 UTC sequence=31 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:46.940185100 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:46.940339900 UTC sequence=30 event=FrameCaptured { sequence: 31, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:46.940559100 UTC sequence=31 event=FrameCaptured { sequence: 32, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:47.246872500 UTC frames_captured=33 roi_active=false receivers=3
+CapDebug: recv frames=32 roi=false resolution=3840x2160
+CapDebug: recv frames=33 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:47.565013300 UTC frames_captured=34 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=33 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:47.583860500 UTC seq=32 queue_len=1
+Forwarder: received capture telemetry frames=34 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:47.584218100 UTC seq=33 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:47.584380600 UTC sequence=32 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:47.584604 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:47.584775200 UTC sequence=33 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:47.584924200 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:47.585135400 UTC sequence=32 event=FrameCaptured { sequence: 33, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:47.585286 UTC sequence=33 event=FrameCaptured { sequence: 34, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:47.883706400 UTC frames_captured=35 roi_active=false receivers=3
+CapDebug: recv frames=34 roi=false resolution=3840x2160
+CapDebug: recv frames=35 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:48.193768700 UTC frames_captured=36 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=35 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:48.213013 UTC seq=34 queue_len=1
+Forwarder: received capture telemetry frames=36 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:48.213318500 UTC seq=35 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:48.213480900 UTC sequence=34 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:48.213663600 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:48.213811900 UTC sequence=35 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:48.214056600 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:48.214212300 UTC sequence=34 event=FrameCaptured { sequence: 35, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:48.214373 UTC sequence=35 event=FrameCaptured { sequence: 36, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:48.528222900 UTC frames_captured=37 roi_active=false receivers=3
+CapDebug: recv frames=36 roi=false resolution=3840x2160
+CapDebug: recv frames=37 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:48.858906700 UTC frames_captured=38 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=37 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:48.866742300 UTC seq=36 queue_len=1
+Forwarder: received capture telemetry frames=38 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:48.867056200 UTC seq=37 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:48.867217900 UTC sequence=36 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:48.867371500 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:48.867523100 UTC sequence=37 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:48.867672100 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:48.867859100 UTC sequence=36 event=FrameCaptured { sequence: 37, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:48.868044100 UTC sequence=37 event=FrameCaptured { sequence: 38, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:49.155141200 UTC frames_captured=39 roi_active=false receivers=3
+CapDebug: recv frames=38 roi=false resolution=3840x2160
+CapDebug: recv frames=39 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:49.475172500 UTC frames_captured=40 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=39 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:49.494131 UTC seq=38 queue_len=1
+Forwarder: received capture telemetry frames=40 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:49.494436200 UTC seq=39 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:49.494596400 UTC sequence=38 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:49.494752300 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:49.494902200 UTC sequence=39 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:49.495049800 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:49.495203100 UTC sequence=38 event=FrameCaptured { sequence: 39, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:49.495406500 UTC sequence=39 event=FrameCaptured { sequence: 40, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:49.792009200 UTC frames_captured=41 roi_active=false receivers=3
+CapDebug: recv frames=40 roi=false resolution=3840x2160
+CapDebug: recv frames=41 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:50.118024700 UTC frames_captured=42 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=41 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:50.120694700 UTC seq=40 queue_len=1
+Forwarder: received capture telemetry frames=42 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:50.121000300 UTC seq=41 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:50.121163300 UTC sequence=40 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:50.121316800 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:50.121469200 UTC sequence=41 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:50.121619300 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:50.121779600 UTC sequence=40 event=FrameCaptured { sequence: 41, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:50.121955400 UTC sequence=41 event=FrameCaptured { sequence: 42, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:50.417656100 UTC frames_captured=43 roi_active=false receivers=3
+CapDebug: recv frames=42 roi=false resolution=3840x2160
+CapDebug: recv frames=43 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:50.741894600 UTC frames_captured=44 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=43 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:50.751510500 UTC seq=42 queue_len=1
+Forwarder: received capture telemetry frames=44 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:50.751817400 UTC seq=43 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:50.751976600 UTC sequence=42 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:50.752128400 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:50.752277900 UTC sequence=43 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:50.752424100 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:50.752578300 UTC sequence=42 event=FrameCaptured { sequence: 43, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:50.752730500 UTC sequence=43 event=FrameCaptured { sequence: 44, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:51.049238600 UTC frames_captured=45 roi_active=false receivers=3
+CapDebug: recv frames=44 roi=false resolution=3840x2160
+CapDebug: recv frames=45 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:51.365893200 UTC frames_captured=46 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=45 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:51.393374700 UTC seq=44 queue_len=1
+Forwarder: received capture telemetry frames=46 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:51.398222400 UTC seq=45 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:51.401016900 UTC sequence=44 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:51.401312500 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:51.403276200 UTC sequence=45 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:51.403462100 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:51.403691400 UTC sequence=44 event=FrameCaptured { sequence: 45, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:51.404011800 UTC sequence=45 event=FrameCaptured { sequence: 46, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:51.693697400 UTC frames_captured=47 roi_active=false receivers=3
+CapDebug: recv frames=46 roi=false resolution=3840x2160
+CapDebug: recv frames=47 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:52.014273100 UTC frames_captured=48 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=47 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:52.033479800 UTC seq=46 queue_len=1
+Forwarder: received capture telemetry frames=48 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:52.033805300 UTC seq=47 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:52.033968100 UTC sequence=46 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:52.034130100 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:52.034278600 UTC sequence=47 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:52.034546900 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:52.034731200 UTC sequence=46 event=FrameCaptured { sequence: 47, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:52.034915700 UTC sequence=47 event=FrameCaptured { sequence: 48, width: 3840, height: 2160, size_bytes: 24883200 }
+CaptureService: emitting telemetry ts=2026-03-17 22:47:52.324786300 UTC frames_captured=49 roi_active=false receivers=3
+CapDebug: recv frames=48 roi=false resolution=3840x2160
+CapDebug: recv frames=49 roi=false resolution=3840x2160
+CaptureService: emitting telemetry ts=2026-03-17 22:47:52.637689400 UTC frames_captured=50 roi_active=false receivers=3
+Forwarder: received capture telemetry frames=49 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:52.656901800 UTC seq=48 queue_len=1
+Forwarder: received capture telemetry frames=50 roi=false resolution=3840x2160
+Forwarder: enqueued envelope ts=2026-03-17 22:47:52.657210600 UTC seq=49 queue_len=2
+Dispatcher: send-start ts=2026-03-17 22:47:52.657373200 UTC sequence=48 receivers=3 queue_before=2 queue_after=1
+Dispatcher: envelope sent ts=2026-03-17 22:47:52.657605100 UTC duration_ms=0
+Dispatcher: send-start ts=2026-03-17 22:47:52.657856500 UTC sequence=49 receivers=3 queue_before=1 queue_after=0
+Dispatcher: envelope sent ts=2026-03-17 22:47:52.658071500 UTC duration_ms=0
+DebugSub: recv ts=2026-03-17 22:47:52.658229700 UTC sequence=48 event=FrameCaptured { sequence: 49, width: 3840, height: 2160, size_bytes: 24883200 }
+DebugSub: recv ts=2026-03-17 22:47:52.658385900 UTC sequence=49 event=FrameCaptured { sequence: 50, width: 3840, height: 2160, size_bytes: 24883200 }

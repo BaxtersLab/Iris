@@ -1,0 +1,7 @@
+[package]
+name = "print-metrics"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iris-core = { path = "../../crates/iris-core" }

@@ -63,6 +63,14 @@ pub enum IpcCommand {
     },
     GetStreamStats,
 
+    /// Bring the GUI to the foreground on the machine running the UI.
+    /// Cross-process: send this to the running `iris-ui` to pop up the window.
+    ShowUi,
+
+    /// Test-only: force a rebase event inside the process that receives this command.
+    /// Not intended for production use.
+    ForceRebase,
+
     ReloadConfig,
     GetConfig,
     UpdateConfig {

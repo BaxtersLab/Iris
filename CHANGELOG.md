@@ -6,6 +6,18 @@ Unreleased
 ----------
 - No unreleased changes.
 
+Phase-6: Sealed - 2026-03-17
+---------------------------
+- Acceptance: GUI smoke and real-device validation completed locally.
+- GUI smoke: ran `.github/scripts/gui-smoke.ps1` which triggered `/debug/force_rebase` and validated the Prometheus metric `iris_encoder_rebase_total == 1`.
+- Real-device validation: ran `.github/scripts/real-device-validate.ps1` (started `iris-ui` with `IRIS_BACKEND=dxgi`). The harness invoked `.github/scripts/bring-iris-front.ps1` to attempt foregrounding the UI and collected runtime telemetry showing repeated `FrameCaptured` events.
+- Artifacts produced locally:
+  - `ci-artifacts/phase-6/iris-ui-windows.zip`
+  - `harness-output/phase-6/real-device/metrics.txt`
+  - `harness-output/phase-6/real-device/iris-ui-real-device.log`
+  - `harness-output/phase-6/real-device/log-tail.txt`
+
+
 Phase-4: Sealed - 2026-03-17
 ---------------------------
 - Implemented `RecordingPipeline` encoder worker (ffmpeg subprocess) with

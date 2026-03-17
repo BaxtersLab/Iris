@@ -13,7 +13,8 @@ use crate::backend::CaptureBackend;
 use crate::backend::CaptureConfig;
 use crate::frame::CaptureFrame;
 use iris_core::error::{IrisError, IrisResult};
-use iris_hal::device::PixelFormat;
+// Note: dxgi backend maps HAL pixel formats into `iris_core::PixelFormat` when
+// creating `CaptureFrame` instances.
 
 pub struct DxgiCaptureBackend {
     device: Option<ID3D11Device>,
@@ -97,7 +98,10 @@ impl CaptureBackend for DxgiCaptureBackend {
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Usage: D3D11_USAGE_STAGING,
                 BindFlags: 0,
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
@@ -201,7 +205,7 @@ impl CaptureBackend for DxgiCaptureBackend {
                 sequence: self.sequence,
                 width: self.width,
                 height: self.height,
-                format: PixelFormat::Bgr24,
+                format: iris_core::PixelFormat::Bgr24,
                 data,
                 timestamp_us: CaptureFrame::now_us(),
                 is_cropped: false,

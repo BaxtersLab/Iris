@@ -37,3 +37,6 @@ widestring = { version = "0.5", optional = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = "0.48"
 widestring = "0.5"
+
+[dev-dependencies]
+regex = "1.10"

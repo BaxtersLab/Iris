@@ -82,14 +82,21 @@ impl CaptureBackend for MockCaptureBackend {
         ))
         .await;
         self.sequence += 1;
-        let fmt = self.config.format.clone();
-        let size = CaptureFrame::expected_size(self.config.width, self.config.height, fmt.clone());
+        let fmt_hal = self.config.format.clone();
+        // Map local HAL PixelFormat -> core PixelFormat
+        let fmt_core = match fmt_hal {
+            iris_hal::device::PixelFormat::Rgb24 => iris_core::PixelFormat::Rgb24,
+            iris_hal::device::PixelFormat::Bgr24 => iris_core::PixelFormat::Bgr24,
+            iris_hal::device::PixelFormat::Nv12 => iris_core::PixelFormat::Nv12,
+            iris_hal::device::PixelFormat::Yuyv => iris_core::PixelFormat::Yuyv,
+        };
+        let size = CaptureFrame::expected_size(self.config.width, self.config.height, fmt_core);
         let data = vec![128u8; size.max(1)];
         Ok(CaptureFrame {
             sequence: self.sequence,
             width: self.config.width,
             height: self.config.height,
-            format: fmt,
+            format: fmt_core,
             data,
             timestamp_us: CaptureFrame::now_us(),
             is_cropped: false,

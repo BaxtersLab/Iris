@@ -4,6 +4,7 @@ mod tests {
     use crate::frame::{CaptureFrame, Roi};
     use crate::service::{CaptureCommand, CaptureService};
     use crate::telemetry::CaptureTelemetry;
+    use iris_core::PixelFormat as CorePixelFormat;
     use iris_hal::device::PixelFormat;
     use tokio::sync::broadcast;
     use tokio::time::{timeout, Duration};
@@ -11,7 +12,7 @@ mod tests {
     #[test]
     fn test_expected_size() {
         assert_eq!(
-            CaptureFrame::expected_size(640, 480, PixelFormat::Rgb24),
+            CaptureFrame::expected_size(640, 480, CorePixelFormat::Rgb24),
             640 * 480 * 3
         );
     }
@@ -108,7 +109,8 @@ mod tests {
         };
         let backend = MockCaptureBackend::new(cfg.clone());
         let (tx, _rx) = broadcast::channel(8);
-        let (svc, handle) = CaptureService::new(backend, cfg.clone(), tx.clone());
+        let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(8);
+        let (svc, handle) = CaptureService::new(backend, cfg.clone(), tx.clone(), frame_tx.clone());
         // Instead spawn run with its own receiver
         let (cmd_tx, cmd_rx2) = tokio::sync::mpsc::channel(8);
         let svc_task = tokio::spawn(svc.run(cmd_rx2));
@@ -141,7 +143,9 @@ mod tests {
         };
         let backend = MockCaptureBackend::new(cfg.clone());
         let (tx, _rx) = broadcast::channel(8);
-        let (svc, _handle) = CaptureService::new(backend, cfg.clone(), tx.clone());
+        let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(8);
+        let (svc, _handle) =
+            CaptureService::new(backend, cfg.clone(), tx.clone(), frame_tx.clone());
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
         let svc_task = tokio::spawn(svc.run(cmd_rx));
 
@@ -169,7 +173,9 @@ mod tests {
         };
         let backend = MockCaptureBackend::new(cfg.clone());
         let (tx, _rx) = broadcast::channel(8);
-        let (svc, mut handle) = CaptureService::new(backend, cfg.clone(), tx.clone());
+        let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(8);
+        let (svc, mut handle) =
+            CaptureService::new(backend, cfg.clone(), tx.clone(), frame_tx.clone());
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
         let svc_task = tokio::spawn(svc.run(cmd_rx));
         // consumer slower than producer: receive a couple frames
@@ -202,7 +208,9 @@ mod tests {
         };
         let backend = MockCaptureBackend::new(cfg.clone());
         let (tx, _rx) = broadcast::channel(8);
-        let (svc, mut handle) = CaptureService::new(backend, cfg.clone(), tx.clone());
+        let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(8);
+        let (svc, mut handle) =
+            CaptureService::new(backend, cfg.clone(), tx.clone(), frame_tx.clone());
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
         let svc_task = tokio::spawn(svc.run(cmd_rx));
         // read one frame
@@ -226,7 +234,9 @@ mod tests {
         };
         let backend = MockCaptureBackend::new(cfg.clone());
         let (tx, mut rx) = broadcast::channel::<CaptureTelemetry>(8);
-        let (svc, _handle) = CaptureService::new(backend, cfg.clone(), tx.clone());
+        let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(8);
+        let (svc, _handle) =
+            CaptureService::new(backend, cfg.clone(), tx.clone(), frame_tx.clone());
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
         let svc_task = tokio::spawn(svc.run(cmd_rx));
         // Wait for one telemetry
@@ -254,7 +264,9 @@ mod tests {
         };
         let backend = MockCaptureBackend::new(cfg.clone());
         let (tx, _rx) = broadcast::channel(8);
-        let (svc, mut handle) = CaptureService::new(backend, cfg.clone(), tx.clone());
+        let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(8);
+        let (svc, mut handle) =
+            CaptureService::new(backend, cfg.clone(), tx.clone(), frame_tx.clone());
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
         let svc_task = tokio::spawn(svc.run(cmd_rx));
         // read one frame and assert it was cropped with even dimensions
@@ -287,7 +299,9 @@ mod tests {
         };
         let backend = MockCaptureBackend::new(cfg.clone());
         let (tx, _rx) = broadcast::channel(8);
-        let (svc, mut handle) = CaptureService::new(backend, cfg.clone(), tx.clone());
+        let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(8);
+        let (svc, mut handle) =
+            CaptureService::new(backend, cfg.clone(), tx.clone(), frame_tx.clone());
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
         let svc_task = tokio::spawn(svc.run(cmd_rx));
         if let Some(f) = handle.frame_rx.recv().await {
@@ -319,7 +333,9 @@ mod tests {
         };
         let backend = MockCaptureBackend::new(cfg.clone());
         let (tx, mut rx) = broadcast::channel::<CaptureTelemetry>(8);
-        let (svc, mut handle) = CaptureService::new(backend, cfg.clone(), tx.clone());
+        let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(8);
+        let (svc, mut handle) =
+            CaptureService::new(backend, cfg.clone(), tx.clone(), frame_tx.clone());
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         let svc_task = tokio::spawn(svc.run(cmd_rx));
 

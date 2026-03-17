@@ -36,7 +36,6 @@ impl HotplugMonitor {
         // stub: real implementation would watch OS device notifications
         Ok(())
     }
-
 }
 
 impl Default for HotplugMonitor {

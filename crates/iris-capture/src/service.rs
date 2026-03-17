@@ -3,7 +3,7 @@ use crate::frame::{CaptureFrame, Roi};
 use crate::telemetry::CaptureTelemetry;
 use chrono::Utc;
 use iris_core::error::IrisResult;
-use iris_hal::device::PixelFormat;
+use iris_core::PixelFormat;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -78,6 +78,7 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
         backend: B,
         config: CaptureConfig,
         telemetry_tx: broadcast::Sender<CaptureTelemetry>,
+        frame_tx: tokio::sync::mpsc::Sender<CaptureFrame>,
     ) -> (Self, CaptureHandle) {
         let (out_tx, frame_rx) = mpsc::channel(config.max_queue_depth);
         let (cmd_tx, _cmd_rx) = mpsc::channel(8);
@@ -104,6 +105,7 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
         };
 
         // Spawn forwarder task: move frames from internal buffer to the external channel
+        let forward_frame_tx = frame_tx.clone();
         tokio::spawn(async move {
             loop {
                 notify.notified().await;
@@ -116,10 +118,13 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
                         }
                     }
                     if let Some(f) = maybe_frame {
-                        if out_tx.send(f).await.is_err() {
+                        // send to internal consumer channel
+                        if out_tx.send(f.clone()).await.is_err() {
                             // receiver dropped — exit forwarder
                             return;
                         }
+                        // also attempt to forward to external encoder/consumer if provided
+                        let _ = forward_frame_tx.clone().try_send(f);
                     } else {
                         break;
                     }

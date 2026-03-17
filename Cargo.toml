@@ -9,6 +9,8 @@ members = [
     "crates/iris-control",
     "crates/iris-stream",
     "crates/iris-ui",
+    "crates/iris-harness",
+    "tools/print-metrics",
 ]
 
 [profile.release]

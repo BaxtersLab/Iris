@@ -374,7 +374,9 @@ mod wmf {
 
                 let mut formats = Vec::new();
                 let mut idx = 0u32;
-                while let Ok(media_type) = reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, idx) {
+                while let Ok(media_type) =
+                    reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, idx)
+                {
                     if let Some(fd) = media_type_to_format(&media_type) {
                         if !formats.contains(&fd) {
                             formats.push(fd);

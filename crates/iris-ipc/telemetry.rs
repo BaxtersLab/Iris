@@ -131,6 +131,16 @@ pub enum TelemetryEvent {
         subsystem: String,
         message: String,
     },
+    /// Emitted when the encoder PTS->capture mapping is rebased due to drift
+    /// or wrap handling. Consumers may use this to correlate mapping changes
+    /// with encoder/muxer behavior.
+    EncoderRebase {
+        prev_raw: i64,
+        prev_capture: i64,
+        new_raw: i64,
+        new_capture: i64,
+        reason: String,
+    },
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 PHASE 2 — PIPELINE WIRING: CAPTURE → ENCODE → MUX
 Baxter's Screen Record — Agent 2 Execution Block
 ================================================================================
-
+CRATES:         iris-capture, iris-encode, iris-mux, iris-ipc, iris-core, iris-ui
 PHASE:          2 of 4
 MODULES:        B (Capture), C (Encode), D (Mux), E (IPC), F (UI)
 CRATES:         bsr-capture, bsr-encode, bsr-mux, bsr-ipc, bsr-core, bsr-ui
@@ -77,7 +77,6 @@ source of truth. Both bsr-encode and bsr-mux import from bsr-core.
 Then:
   - bsr-encode: remove local EncodedPacket, use bsr_core::EncodedPacket
   - bsr-mux: remove local EncodedPacket, use bsr_core::EncodedPacket
-  - Update all `use` statements, constructor callsites, field accesses
   - cargo check --workspace to verify
 
 Option B: Keep EncodedPacket in bsr-encode, add bsr-encode as a dependency
@@ -127,7 +126,6 @@ Move to bsr-core/src/lib.rs (add alongside existing BsrConfig, AppState):
 
 Then in bsr-capture/src/lib.rs:
   - Remove CaptureFrame and FrameFormat definitions
-  - Add: pub use bsr_core::{CaptureFrame, FrameFormat};  (re-export so
     existing downstream code doesn't break)
 
 In bsr-encode/src/lib.rs:
@@ -170,7 +168,6 @@ MODIFY CaptureService to accept an mpsc::Sender<CaptureFrame>:
     }
 
 In the run() loop, replace the "TODO: Send frame to encoder" with:
-
     match self.backend.capture_frame().await {
         Ok(frame) => {
             if self.frame_tx.send(frame).await.is_err() {
@@ -335,7 +332,6 @@ Create a new module in bsr-core or a new file crates/bsr-core/src/pipeline.rs
             let _ = self.muxer_cmd_tx.send(MuxerCommand::Stop).await;
 
             // 5. Wait for muxer to finish
-            if let Some(h) = self.mux_handle.take() {
                 let _ = h.await;
             }
 
@@ -422,17 +418,12 @@ Add as needed:
 
     pub struct EncodeSubConfig {
         pub preset: String,
-        pub bitrate_kbps: u32,
     }
 
-    pub struct OutputSubConfig {
         pub directory: String,
-        pub naming_strategy: FileNamingStrategy,
         pub max_duration_secs: Option<u64>,
-    }
 
 These should be Serialize + Deserialize + Default. Provide sensible
-defaults (1920x1080, 30fps, medium preset, 8000 kbps, user's Videos
 folder, timestamp naming).
 
 ================================================================================
