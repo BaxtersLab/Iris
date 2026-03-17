@@ -17,6 +17,9 @@ pub struct IrisApp {
     last_frame_info: Arc<Mutex<Option<(u32, u32)>>>,
     capture_rx: Option<tokio::sync::mpsc::Receiver<CaptureFrame>>,
     preview_texture: Option<TextureHandle>,
+    // When capture_rx is closed, give it a short grace period before dropping
+    // the receiver so transient races do not remove the preview permanently.
+    capture_rx_deadline: Option<std::time::Instant>,
 }
 
 impl IrisApp {
@@ -31,15 +34,15 @@ impl IrisApp {
             last_frame_info: Arc::new(Mutex::new(None)),
             capture_rx: Some(capture.frame_rx),
             preview_texture: None,
+            capture_rx_deadline: None,
         };
 
         // fetch initial device list
         let ipc_clone = ipc.clone();
         let devices_ref = app.devices.clone();
         tokio::spawn(async move {
-            if let Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) = ipc_clone
-                .send_command(IpcCommand::ListDevices)
-                .await
+            if let Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) =
+                ipc_clone.send_command(IpcCommand::ListDevices).await
             {
                 if let Ok(mut dv) = devices_ref.lock() {
                     *dv = devices;
@@ -75,9 +78,12 @@ impl eframe::App for IrisApp {
                         new_entries.push(s);
                     }
                     Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
-                    Err(e) => {
-                        // Log try_recv errors (including Lagged) and stop draining for now
-                        println!("IrisApp: telemetry try_recv error: {:?}", e);
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                        println!("IrisApp: telemetry lagged, skipped {} messages", n);
+                        break;
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                        println!("IrisApp: telemetry channel closed");
                         break;
                     }
                 }
@@ -96,13 +102,27 @@ impl eframe::App for IrisApp {
         TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Iris — Mock UI");
-                if ui.button("Start Capture").clicked() {
+
+                // Enable Start only when a device is selected
+                let has_device = match self.selected_device.lock() {
+                    Ok(g) => g.is_some(),
+                    Err(_) => false,
+                };
+
+                let start_resp = ui
+                    .add_enabled(has_device, egui::Button::new("Start Capture"))
+                    .on_hover_text(if has_device { "Start camera capture" } else { "Select a device first" });
+                if start_resp.clicked() {
                     let ipc = Arc::clone(&self.ipc);
                     tokio::spawn(async move {
                         let _ = ipc.send_command(IpcCommand::StartCapture).await;
                     });
                 }
-                if ui.button("Stop Capture").clicked() {
+
+                let stop_resp = ui
+                    .add_enabled(true, egui::Button::new("Stop Capture"))
+                    .on_hover_text("Stop camera capture");
+                if stop_resp.clicked() {
                     let ipc = Arc::clone(&self.ipc);
                     tokio::spawn(async move {
                         let _ = ipc.send_command(IpcCommand::StopCapture).await;
@@ -164,12 +184,15 @@ impl eframe::App for IrisApp {
                         loop {
                             match rx.try_recv() {
                                 Ok(frame) => {
+                                    // On successful frame, clear any pending deadline
+                                    self.capture_rx_deadline = None;
+
                                     // convert BGR24 or other formats to RGBA
                                     let w = frame.width as usize;
                                     let h = frame.height as usize;
                                     let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 4);
                                     match frame.format {
-                                        iris_hal::device::PixelFormat::Bgr24 => {
+                                        iris_core::PixelFormat::Bgr24 => {
                                             let d = frame.data;
                                             for i in (0..d.len()).step_by(3) {
                                                 let b = d[i];
@@ -181,7 +204,7 @@ impl eframe::App for IrisApp {
                                                 pixels.push(255);
                                             }
                                         }
-                                        iris_hal::device::PixelFormat::Rgb24 => {
+                                        iris_core::PixelFormat::Rgb24 => {
                                             let d = frame.data;
                                             for i in (0..d.len()).step_by(3) {
                                                 let r = d[i];
@@ -215,8 +238,19 @@ impl eframe::App for IrisApp {
                                     }
                                 }
                                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                                Err(_) => {
-                                    self.capture_rx = None;
+                                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                    // Start a short grace period before dropping the receiver
+                                    if self.capture_rx_deadline.is_none() {
+                                        self.capture_rx_deadline =
+                                            Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+                                        println!("IrisApp: capture_rx closed; will drop receiver after 1s unless recovered");
+                                    } else if let Some(d) = self.capture_rx_deadline {
+                                        if std::time::Instant::now() >= d {
+                                            println!("IrisApp: dropping closed capture_rx after grace period");
+                                            self.capture_rx = None;
+                                            self.capture_rx_deadline = None;
+                                        }
+                                    }
                                     break;
                                 }
                             }
