@@ -28,11 +28,19 @@ pub struct HotplugMonitor {
 
 impl HotplugMonitor {
     pub fn new() -> Self {
-        HotplugMonitor { _state: Arc::new(Mutex::new(())) }
+        HotplugMonitor {
+            _state: Arc::new(Mutex::new(())),
+        }
     }
-
     pub async fn run(&self, _mut_handle: HotplugHandle) -> HalResult<()> {
         // stub: real implementation would watch OS device notifications
         Ok(())
+    }
+
+}
+
+impl Default for HotplugMonitor {
+    fn default() -> Self {
+        Self::new()
     }
 }

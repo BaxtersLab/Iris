@@ -12,7 +12,10 @@ async fn telemetry_assertions() {
 
     // Subscribe to global telemetry envelope stream
     let mut sub = ipc.subscribe_telemetry();
-    println!("telemetry_integration: subscribe_telemetry returned subscriber id={}", sub.id());
+    println!(
+        "telemetry_integration: subscribe_telemetry returned subscriber id={}",
+        sub.id()
+    );
 
     use iris_ipc::command::IpcCommand;
 
@@ -34,7 +37,13 @@ async fn telemetry_assertions() {
         match tokio::time::timeout(to, sub.recv()).await {
             Ok(Ok(env)) => {
                 use iris_ipc::telemetry::TelemetryEvent;
-                if let TelemetryEvent::FrameCaptured { sequence, width, height, size_bytes } = env.event {
+                if let TelemetryEvent::FrameCaptured {
+                    sequence,
+                    width,
+                    height,
+                    size_bytes,
+                } = env.event
+                {
                     // Basic assertions
                     assert!(width > 0, "width must be > 0");
                     assert!(height > 0, "height must be > 0");
@@ -63,7 +72,10 @@ async fn telemetry_assertions() {
         }
     }
 
-    println!("telemetry_integration: collected {} pre-ROI frames", received);
+    println!(
+        "telemetry_integration: collected {} pre-ROI frames",
+        received
+    );
 
     // compute observed fps
     if let (Some(s), Some(l)) = (start_instant, last_instant) {
@@ -75,7 +87,11 @@ async fn telemetry_assertions() {
     }
 
     // size_bytes may be zero in mock backends; ensure non-negative at least
-    assert!(received >= 3, "expected at least 3 telemetry frames, got {}", received);
+    assert!(
+        received >= 3,
+        "expected at least 3 telemetry frames, got {}",
+        received
+    );
 
     // Now test ROI behavior: set an ROI and ensure subsequent frames have dimensions
     // that are <= the original frame dimensions and observe at least one post-ROI frame.
@@ -84,14 +100,27 @@ async fn telemetry_assertions() {
     let roi_w = (ow / 2).max(1);
     let roi_h = (oh / 2).max(1);
 
-    let _ = ipc.send_command(IpcCommand::SetRoi { x: 0, y: 0, width: roi_w, height: roi_h }).await;
+    let _ = ipc
+        .send_command(IpcCommand::SetRoi {
+            x: 0,
+            y: 0,
+            width: roi_w,
+            height: roi_h,
+        })
+        .await;
 
     // Diagnostic probe: create a fresh subscription after ROI to verify whether
     // newly-subscribed receivers observe post-ROI frames (helps narrow root cause).
     let mut probe_sub = ipc.subscribe_telemetry();
-    println!("telemetry_integration: probe subscriber id={}", probe_sub.id());
+    println!(
+        "telemetry_integration: probe subscriber id={}",
+        probe_sub.id()
+    );
     match tokio::time::timeout(Duration::from_secs(2), probe_sub.recv()).await {
-        Ok(Ok(env)) => println!("telemetry_integration: probe recv ok post-ROI env={:?}", env),
+        Ok(Ok(env)) => println!(
+            "telemetry_integration: probe recv ok post-ROI env={:?}",
+            env
+        ),
         Ok(Err(e)) => println!("telemetry_integration: probe recv error after ROI: {:?}", e),
         Err(_) => println!("telemetry_integration: probe timeout waiting for a post-ROI frame"),
     }
@@ -106,17 +135,28 @@ async fn telemetry_assertions() {
         match tokio::time::timeout(to, sub.recv()).await {
             Ok(Ok(env)) => {
                 use iris_ipc::telemetry::TelemetryEvent;
-                if let TelemetryEvent::FrameCaptured { width, height, size_bytes, .. } = env.event {
+                if let TelemetryEvent::FrameCaptured {
+                    width,
+                    height,
+                    size_bytes,
+                    ..
+                } = env.event
+                {
                     assert!(width <= ow, "post-ROI width should not exceed original");
                     assert!(height <= oh, "post-ROI height should not exceed original");
                     if let Some(orig) = original_size_bytes {
-                        if size_bytes < orig { post_smaller = true; }
+                        if size_bytes < orig {
+                            post_smaller = true;
+                        }
                     }
                     post_received += 1;
                 }
             }
             Ok(Err(e)) => {
-                println!("telemetry_integration: recv returned error after ROI: {:?}", e);
+                println!(
+                    "telemetry_integration: recv returned error after ROI: {:?}",
+                    e
+                );
                 break;
             }
             Err(_) => {
@@ -129,7 +169,14 @@ async fn telemetry_assertions() {
     // Stop capture
     let _ = ipc.send_command(IpcCommand::StopCapture).await;
 
-    assert!(post_received >= 1, "expected at least 1 telemetry frame after ROI, got {}", post_received);
-    assert!(post_smaller, "expected at least one post-ROI frame with smaller size_bytes");
+    assert!(
+        post_received >= 1,
+        "expected at least 1 telemetry frame after ROI, got {}",
+        post_received
+    );
+    assert!(
+        post_smaller,
+        "expected at least one post-ROI frame with smaller size_bytes"
+    );
     // It's acceptable if mock backend doesn't change resolution to ROI exactly.
 }

@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::frame::{CaptureFrame, Roi};
+use async_trait::async_trait;
 use iris_core::error::IrisResult;
 use iris_hal::device::PixelFormat;
 
@@ -10,11 +10,17 @@ pub enum DropPolicy {
 }
 
 impl DropPolicy {
-    pub fn from_str(s: &str) -> Option<Self> {
+    // Prefer the standard `FromStr` trait implementation below. If callers
+    // need an Option-returning helper they can use `s.parse().ok()`.
+}
+
+impl std::str::FromStr for DropPolicy {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "oldest" => Some(DropPolicy::Oldest),
-            "newest" => Some(DropPolicy::Newest),
-            _ => None,
+            "oldest" => Ok(DropPolicy::Oldest),
+            "newest" => Ok(DropPolicy::Newest),
+            _ => Err(()),
         }
     }
 }
@@ -46,7 +52,11 @@ pub struct MockCaptureBackend {
 
 impl MockCaptureBackend {
     pub fn new(config: CaptureConfig) -> Self {
-        MockCaptureBackend { capturing: false, sequence: 0, config }
+        MockCaptureBackend {
+            capturing: false,
+            sequence: 0,
+            config,
+        }
     }
 }
 
@@ -55,20 +65,22 @@ impl CaptureBackend for MockCaptureBackend {
     async fn start(&mut self) -> IrisResult<()> {
         self.capturing = true;
         self.sequence = 0;
-        Ok(().into())
+        Ok(())
     }
 
     async fn stop(&mut self) -> IrisResult<()> {
         self.capturing = false;
-        Ok(().into())
+        Ok(())
     }
 
     async fn next_frame(&mut self) -> IrisResult<CaptureFrame> {
         if !self.capturing {
-            return Err(iris_core::error::IrisError::Capture("not capturing".into()))
-                .map_err(|e| e);
+            return Err(iris_core::error::IrisError::Capture("not capturing".into()));
         }
-        tokio::time::sleep(std::time::Duration::from_millis(1000 / self.config.target_fps as u64)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            1000 / self.config.target_fps as u64,
+        ))
+        .await;
         self.sequence += 1;
         let fmt = self.config.format.clone();
         let size = CaptureFrame::expected_size(self.config.width, self.config.height, fmt.clone());
@@ -106,6 +118,6 @@ impl<T: CaptureBackend + ?Sized + Send + Sync> CaptureBackend for Box<T> {
     }
 
     fn is_capturing(&self) -> bool {
-        (&**self).is_capturing()
+        (**self).is_capturing()
     }
 }

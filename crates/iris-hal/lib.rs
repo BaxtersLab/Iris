@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Iris — iris-hal
 
-pub mod device;
 pub mod backend;
-pub mod hotplug;
+pub mod device;
 pub mod error;
+pub mod hotplug;
 
 #[cfg(test)]
 mod tests;
-

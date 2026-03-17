@@ -1,9 +1,9 @@
-use crate::command::IpcCommand;
-use crate::response::{IpcResponse, ResponseData};
-use crate::telemetry::{TelemetryEnvelope, TelemetryEvent};
-use crate::envelope::IpcEnvelope;
-use crate::server::IpcServer;
 use crate::client::IpcClient;
+use crate::command::IpcCommand;
+use crate::envelope::IpcEnvelope;
+use crate::response::{IpcResponse, ResponseData};
+use crate::server::IpcServer;
+use crate::telemetry::{TelemetryEnvelope, TelemetryEvent};
 use tokio::task;
 
 #[tokio::test]
@@ -24,7 +24,16 @@ async fn test_response_json_roundtrip() {
 
 #[tokio::test]
 async fn test_telemetry_json_roundtrip() {
-    let env = TelemetryEnvelope { timestamp: chrono::Utc::now(), sequence: 1, event: TelemetryEvent::CaptureStarted { width: 1920, height: 1080, fps: 30, format: "nv12".to_string() } };
+    let env = TelemetryEnvelope {
+        timestamp: chrono::Utc::now(),
+        sequence: 1,
+        event: TelemetryEvent::CaptureStarted {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            format: "nv12".to_string(),
+        },
+    };
     let s = serde_json::to_string(&env).unwrap();
     let parsed: TelemetryEnvelope = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed.sequence, 1);
@@ -32,7 +41,10 @@ async fn test_telemetry_json_roundtrip() {
 
 #[tokio::test]
 async fn test_envelope_json_roundtrip() {
-    let env = IpcEnvelope { id: 7, payload: crate::envelope::IpcPayload::Command(IpcCommand::Ping) };
+    let env = IpcEnvelope {
+        id: 7,
+        payload: crate::envelope::IpcPayload::Command(IpcCommand::Ping),
+    };
     let s = serde_json::to_string(&env).unwrap();
     let parsed: IpcEnvelope = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed.id, 7);
@@ -84,8 +96,12 @@ async fn test_telemetry_sequence_ordering() {
     let (server, handle, _telemetry_tx) = IpcServer::new(8);
     // emit multiple telemetry events; subscribe via handle
     let mut sub = handle.subscribe_telemetry();
-    server.emit_telemetry(TelemetryEvent::SystemStarted { version: "0".to_string() });
-    server.emit_telemetry(TelemetryEvent::SystemShutdown { reason: "none".to_string() });
+    server.emit_telemetry(TelemetryEvent::SystemStarted {
+        version: "0".to_string(),
+    });
+    server.emit_telemetry(TelemetryEvent::SystemShutdown {
+        reason: "none".to_string(),
+    });
     let a: crate::telemetry::TelemetryEnvelope = sub.recv().await.unwrap();
     let b: crate::telemetry::TelemetryEnvelope = sub.recv().await.unwrap();
     // we only assert that we received two events

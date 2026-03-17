@@ -1,10 +1,10 @@
 use crate::event::{HrtCommand, HrtEvent, HrtStatus};
+use iris_core::error::IrisResult;
 use iris_ipc::telemetry::{TelemetryEnvelope, TelemetryEvent};
-use tokio::sync::{mpsc, watch, broadcast};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use iris_core::error::IrisResult;
+use tokio::sync::{broadcast, mpsc, watch};
 
 /// Configuration for the HRT service.
 pub struct HrtConfig {
@@ -15,7 +15,11 @@ pub struct HrtConfig {
 
 impl Default for HrtConfig {
     fn default() -> Self {
-        Self { interval_ms: 2000, usb_bandwidth_threshold: 0.85, thermal_threshold_c: 75.0 }
+        Self {
+            interval_ms: 2000,
+            usb_bandwidth_threshold: 0.85,
+            thermal_threshold_c: 75.0,
+        }
     }
 }
 
@@ -26,26 +30,40 @@ pub struct HrtService {
     status_tx: watch::Sender<HrtStatus>,
     telemetry_tx: broadcast::Sender<TelemetryEnvelope>,
     sequence: Arc<AtomicU64>,
-    metrics_override: Arc<tokio::sync::Mutex<Option<(f32,f32,f32)>>>,
+    metrics_override: Arc<tokio::sync::Mutex<Option<(f32, f32, f32)>>>,
 }
 
 /// Handle for sending commands and reading status.
 pub struct HrtHandle {
     cmd_tx: mpsc::Sender<HrtCommand>,
     status_rx: watch::Receiver<HrtStatus>,
-    metrics_override: Arc<tokio::sync::Mutex<Option<(f32,f32,f32)>>>,
+    metrics_override: Arc<tokio::sync::Mutex<Option<(f32, f32, f32)>>>,
 }
 
 impl HrtService {
-    pub fn new(config: HrtConfig, telemetry_tx: broadcast::Sender<TelemetryEnvelope>) -> (Self, HrtHandle) {
+    pub fn new(
+        config: HrtConfig,
+        telemetry_tx: broadcast::Sender<TelemetryEnvelope>,
+    ) -> (Self, HrtHandle) {
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
         let (status_tx, status_rx) = watch::channel(HrtStatus::Idle);
         let sequence = Arc::new(AtomicU64::new(1));
         let metrics_override = Arc::new(tokio::sync::Mutex::new(None));
 
         (
-            Self { config, cmd_rx, status_tx: status_tx.clone(), telemetry_tx: telemetry_tx.clone(), sequence: sequence.clone(), metrics_override: metrics_override.clone() },
-            HrtHandle { cmd_tx, status_rx, metrics_override }
+            Self {
+                config,
+                cmd_rx,
+                status_tx: status_tx.clone(),
+                telemetry_tx: telemetry_tx.clone(),
+                sequence: sequence.clone(),
+                metrics_override: metrics_override.clone(),
+            },
+            HrtHandle {
+                cmd_tx,
+                status_rx,
+                metrics_override,
+            },
         )
     }
 
@@ -98,32 +116,60 @@ impl HrtService {
             let mut guard = self.metrics_override.lock().await;
             if let Some((cpu, mem, usb)) = *guard {
                 *guard = None;
-                return HrtEvent::HealthTick { cpu_percent: cpu, memory_mb: mem, usb_bandwidth_percent: usb };
+                return HrtEvent::HealthTick {
+                    cpu_percent: cpu,
+                    memory_mb: mem,
+                    usb_bandwidth_percent: usb,
+                };
             }
         }
 
         // placeholder zeroed metrics
-        HrtEvent::HealthTick { cpu_percent: 0.0, memory_mb: 0.0, usb_bandwidth_percent: 0.0 }
+        HrtEvent::HealthTick {
+            cpu_percent: 0.0,
+            memory_mb: 0.0,
+            usb_bandwidth_percent: 0.0,
+        }
     }
 
     fn handle_event(&self, ev: HrtEvent) {
         match ev {
-            HrtEvent::HealthTick { cpu_percent, memory_mb, usb_bandwidth_percent } => {
+            HrtEvent::HealthTick {
+                cpu_percent,
+                memory_mb,
+                usb_bandwidth_percent,
+            } => {
                 // emit HealthCheck telemetry
-                let telemetry = TelemetryEvent::HealthCheck { cpu_percent, memory_mb, usb_bandwidth_percent };
+                let telemetry = TelemetryEvent::HealthCheck {
+                    cpu_percent,
+                    memory_mb,
+                    usb_bandwidth_percent,
+                };
                 self.emit(telemetry.clone());
                 // check usb threshold
                 if usb_bandwidth_percent > self.config.usb_bandwidth_threshold {
-                    let warn = TelemetryEvent::UsbBandwidthWarning { current_percent: usb_bandwidth_percent, threshold: self.config.usb_bandwidth_threshold };
+                    let warn = TelemetryEvent::UsbBandwidthWarning {
+                        current_percent: usb_bandwidth_percent,
+                        threshold: self.config.usb_bandwidth_threshold,
+                    };
                     self.emit(warn);
                 }
             }
-            HrtEvent::UsbBandwidthWarning { current_percent, threshold } => {
-                let warn = TelemetryEvent::UsbBandwidthWarning { current_percent, threshold };
+            HrtEvent::UsbBandwidthWarning {
+                current_percent,
+                threshold,
+            } => {
+                let warn = TelemetryEvent::UsbBandwidthWarning {
+                    current_percent,
+                    threshold,
+                };
                 self.emit(warn);
             }
             HrtEvent::UsbDisconnected { device_id } => {
-                let ev = TelemetryEvent::DeviceDisconnected { device_id, reason: "disconnected".to_string() };
+                let ev = TelemetryEvent::DeviceDisconnected {
+                    device_id,
+                    reason: "disconnected".to_string(),
+                };
                 self.emit(ev);
             }
             HrtEvent::ThermalWarning { temperature_c } => {
@@ -143,14 +189,21 @@ impl HrtService {
 
     fn emit(&self, event: TelemetryEvent) {
         let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
-        let envelope = TelemetryEnvelope { timestamp: chrono::Utc::now(), sequence: seq, event };
+        let envelope = TelemetryEnvelope {
+            timestamp: chrono::Utc::now(),
+            sequence: seq,
+            event,
+        };
         let _ = self.telemetry_tx.send(envelope);
     }
 }
 
 impl HrtHandle {
     pub async fn send(&self, cmd: HrtCommand) -> IrisResult<()> {
-        self.cmd_tx.send(cmd).await.map_err(|e| iris_core::error::IrisError::Ipc(format!("hrt send failed: {}", e)))?;
+        self.cmd_tx
+            .send(cmd)
+            .await
+            .map_err(|e| iris_core::error::IrisError::Ipc(format!("hrt send failed: {}", e)))?;
         Ok(())
     }
 

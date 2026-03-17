@@ -48,7 +48,9 @@ async fn main() {
                     let _ = ic.send_command(IpcCommand::StopCapture).await;
                     println!("Headless: StopCapture sent");
                     // Unsubscribe
-                    let _ = ic.send_command(IpcCommand::Unsubscribe { subscriber_id: 1 }).await;
+                    let _ = ic
+                        .send_command(IpcCommand::Unsubscribe { subscriber_id: 1 })
+                        .await;
                     println!("Headless: Unsubscribe sent");
                     // Get status
                     if let Ok(resp) = ic.send_command(IpcCommand::GetStatus).await {
@@ -62,7 +64,13 @@ async fn main() {
             }
 
             let options = eframe::NativeOptions::default();
-            let _ = eframe::run_native("Iris", options, Box::new(move |_cc| Box::new(iris_ui::ui_app::IrisApp::new(ipc.clone(), capture_handle))));
+            let _ = eframe::run_native(
+                "Iris",
+                options,
+                Box::new(move |_cc| {
+                    Box::new(iris_ui::ui_app::IrisApp::new(ipc.clone(), capture_handle))
+                }),
+            );
         }
         Err(e) => {
             eprintln!("Bootstrap failed: {}", e);

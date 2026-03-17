@@ -1,22 +1,21 @@
-use std::sync::Arc;
+use chrono::Utc;
+use iris_capture::backend::{CaptureConfig, DropPolicy};
+use iris_capture::service::{CaptureCommand, CaptureHandle, CaptureService};
+use iris_capture::telemetry::CaptureTelemetry as CaptureTelemetryEvent;
 use iris_core::app::AppState;
 use iris_core::config::IrisConfig;
 use iris_core::error::IrisResult;
-use iris_ipc::{IpcServer, IpcHandle, response::ResponseData, response::IpcResponse};
-use iris_hrt::service::{HrtConfig, HrtService};
-use iris_capture::service::{CaptureService, CaptureHandle, CaptureCommand};
-use iris_capture::backend::{CaptureConfig, DropPolicy};
-use iris_capture::DxgiCaptureBackend;
 use iris_hal::backend::{MockUvcBackend, UvcBackend};
-use tokio::sync::mpsc::{self, Sender as MpscSender};
-use tokio::sync::broadcast;
-use iris_capture::telemetry::CaptureTelemetry as CaptureTelemetryEvent;
-use tokio::task::JoinHandle;
+use iris_hrt::service::{HrtConfig, HrtService};
 use iris_ipc::telemetry::{TelemetryEnvelope, TelemetryEvent};
-use chrono::Utc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use iris_ipc::{response::IpcResponse, response::ResponseData, IpcHandle, IpcServer};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::broadcast;
+use tokio::sync::mpsc::{self, Sender as MpscSender};
+use tokio::task::JoinHandle;
 
 /// Minimal runtime handles returned after bootstrap
 pub struct IrisRuntime {
@@ -43,7 +42,10 @@ impl IrisDispatcher {
 }
 
 impl iris_ipc::Dispatcher for IrisDispatcher {
-    fn dispatch(&mut self, cmd: iris_ipc::command::IpcCommand) -> Pin<Box<dyn Future<Output = IpcResponse> + Send>> {
+    fn dispatch(
+        &mut self,
+        cmd: iris_ipc::command::IpcCommand,
+    ) -> Pin<Box<dyn Future<Output = IpcResponse> + Send>> {
         let cmd_sender = self.capture_cmd.clone();
         Box::pin(async move {
             use iris_ipc::command::IpcCommand;
@@ -64,7 +66,15 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                     let backend = MockUvcBackend::new();
                     match backend.enumerate_devices().await {
                         Ok(list) => {
-                            let devices = list.into_iter().map(|d| iris_ipc::response::DeviceEntry { id: d.id.0.clone(), name: d.name.clone(), vendor: "Iris".to_string(), resolutions: vec![] }).collect();
+                            let devices = list
+                                .into_iter()
+                                .map(|d| iris_ipc::response::DeviceEntry {
+                                    id: d.id.0.clone(),
+                                    name: d.name.clone(),
+                                    vendor: "Iris".to_string(),
+                                    resolutions: vec![],
+                                })
+                                .collect();
                             IpcResponse::Ok(ResponseData::DeviceList { devices })
                         }
                         Err(_) => IpcResponse::Ok(ResponseData::DeviceList { devices: vec![] }),
@@ -82,8 +92,18 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                     let _ = cmd_sender.send(CaptureCommand::SetFps(fps)).await;
                     IpcResponse::Ok(ResponseData::Empty)
                 }
-                IpcCommand::SetRoi { x, y, width, height } => {
-                    let roi = iris_capture::frame::Roi { x, y, width, height };
+                IpcCommand::SetRoi {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    let roi = iris_capture::frame::Roi {
+                        x,
+                        y,
+                        width,
+                        height,
+                    };
                     let _ = cmd_sender.send(CaptureCommand::SetRoi(Some(roi))).await;
                     IpcResponse::Ok(ResponseData::Empty)
                 }
@@ -91,36 +111,35 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                     let _ = cmd_sender.send(CaptureCommand::SetRoi(None)).await;
                     IpcResponse::Ok(ResponseData::Empty)
                 }
-                IpcCommand::SetResolution { width: _, height: _ } => {
-                    IpcResponse::Ok(ResponseData::Empty)
-                }
-                IpcCommand::SetPixelFormat { format: _ } => {
-                    IpcResponse::Ok(ResponseData::Empty)
-                }
-                IpcCommand::SelectDevice { device_id: _ } => {
-                    IpcResponse::Ok(ResponseData::Empty)
-                }
+                IpcCommand::SetResolution {
+                    width: _,
+                    height: _,
+                } => IpcResponse::Ok(ResponseData::Empty),
+                IpcCommand::SetPixelFormat { format: _ } => IpcResponse::Ok(ResponseData::Empty),
+                IpcCommand::SelectDevice { device_id: _ } => IpcResponse::Ok(ResponseData::Empty),
                 IpcCommand::GetDeviceCapabilities => {
-                    IpcResponse::Ok(ResponseData::DeviceCapabilities { capabilities: "unknown".to_string() })
+                    IpcResponse::Ok(ResponseData::DeviceCapabilities {
+                        capabilities: "unknown".to_string(),
+                    })
                 }
-                IpcCommand::Subscribe => {
-                    IpcResponse::Ok(ResponseData::SubscriberId { id: 1 })
-                }
+                IpcCommand::Subscribe => IpcResponse::Ok(ResponseData::SubscriberId { id: 1 }),
                 IpcCommand::Unsubscribe { subscriber_id: _ } => {
                     IpcResponse::Ok(ResponseData::Empty)
                 }
-                IpcCommand::GetStreamStats => {
-                    IpcResponse::Ok(ResponseData::StreamStats { frames_delivered: 0, frames_dropped: 0, subscriber_count: 0, ring_buffer_usage: 0.0 })
-                }
-                IpcCommand::GetConfig => {
-                    IpcResponse::Ok(ResponseData::Config { json: "{}".to_string() })
-                }
-                IpcCommand::ReloadConfig => {
-                    IpcResponse::Ok(ResponseData::Empty)
-                }
-                IpcCommand::UpdateConfig { section: _, json: _ } => {
-                    IpcResponse::Ok(ResponseData::Empty)
-                }
+                IpcCommand::GetStreamStats => IpcResponse::Ok(ResponseData::StreamStats {
+                    frames_delivered: 0,
+                    frames_dropped: 0,
+                    subscriber_count: 0,
+                    ring_buffer_usage: 0.0,
+                }),
+                IpcCommand::GetConfig => IpcResponse::Ok(ResponseData::Config {
+                    json: "{}".to_string(),
+                }),
+                IpcCommand::ReloadConfig => IpcResponse::Ok(ResponseData::Empty),
+                IpcCommand::UpdateConfig {
+                    section: _,
+                    json: _,
+                } => IpcResponse::Ok(ResponseData::Empty),
                 IpcCommand::LoadProfile { name } => {
                     IpcResponse::Ok(ResponseData::ProfileLoaded { name })
                 }
@@ -155,29 +174,48 @@ impl IrisRuntime {
 
         // 4. Mock HAL backend and capture service
         // Pixel format: use available formats from `iris-hal::device::PixelFormat`
-        let capture_cfg = CaptureConfig { width: config.capture.width, height: config.capture.height, target_fps: config.capture.target_fps, format: iris_hal::device::PixelFormat::Bgr24, max_queue_depth: config.capture.max_queue_depth, drop_policy: DropPolicy::Oldest, roi: None };
+        let capture_cfg = CaptureConfig {
+            width: config.capture.width,
+            height: config.capture.height,
+            target_fps: config.capture.target_fps,
+            format: iris_hal::device::PixelFormat::Bgr24,
+            max_queue_depth: config.capture.max_queue_depth,
+            drop_policy: DropPolicy::Oldest,
+            roi: None,
+        };
         // Select capture backend at runtime. Use `IRIS_BACKEND=dxgi` to force DXGI on Windows,
         // otherwise fall back to the mock backend. This keeps selection configurable and safer.
         // Increase capture telemetry capacity to reduce lag/dropped messages
         // during high-frequency or bursty capture periods in tests.
         let (capture_telemetry_tx, _capture_telemetry_rx) = broadcast::channel(4096);
-        let backend_name = std::env::var("IRIS_BACKEND").unwrap_or_default().to_lowercase();
+        let backend_name = std::env::var("IRIS_BACKEND")
+            .unwrap_or_default()
+            .to_lowercase();
 
         // Box up a dynamic backend so `CaptureService` can be instantiated at runtime.
-        let boxed_backend: Box<dyn iris_capture::backend::CaptureBackend + Send + Sync> = if backend_name == "dxgi" {
-            #[cfg(windows)]
-            {
-                Box::new(iris_capture::DxgiCaptureBackend::new(capture_cfg.clone()))
-            }
-            #[cfg(not(windows))]
-            {
-                Box::new(iris_capture::backend::MockCaptureBackend::new(capture_cfg.clone()))
-            }
-        } else {
-            Box::new(iris_capture::backend::MockCaptureBackend::new(capture_cfg.clone()))
-        };
+        let boxed_backend: Box<dyn iris_capture::backend::CaptureBackend + Send + Sync> =
+            if backend_name == "dxgi" {
+                #[cfg(windows)]
+                {
+                    Box::new(iris_capture::DxgiCaptureBackend::new(capture_cfg.clone()))
+                }
+                #[cfg(not(windows))]
+                {
+                    Box::new(iris_capture::backend::MockCaptureBackend::new(
+                        capture_cfg.clone(),
+                    ))
+                }
+            } else {
+                Box::new(iris_capture::backend::MockCaptureBackend::new(
+                    capture_cfg.clone(),
+                ))
+            };
 
-        let (capture_service, capture_handle) = CaptureService::new(boxed_backend, capture_cfg.clone(), capture_telemetry_tx.clone());
+        let (capture_service, capture_handle) = CaptureService::new(
+            boxed_backend,
+            capture_cfg.clone(),
+            capture_telemetry_tx.clone(),
+        );
 
         // create the capture command channel that will be used by the dispatcher
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -187,9 +225,13 @@ impl IrisRuntime {
 
         // 6. Spawn services
         let mut tasks = Vec::new();
-        tasks.push(tokio::spawn(async move { ipc_server.run_with_dispatcher(dispatcher).await }));
+        tasks.push(tokio::spawn(async move {
+            ipc_server.run_with_dispatcher(dispatcher).await
+        }));
         tasks.push(tokio::spawn(async move { hrt_service.run().await }));
-        tasks.push(tokio::spawn(async move { capture_service.run(cmd_rx).await }));
+        tasks.push(tokio::spawn(
+            async move { capture_service.run(cmd_rx).await },
+        ));
 
         // 7. Forward capture telemetry into the global telemetry envelope stream
         // Create a dedicated receiver for the forwarder directly from the
@@ -272,7 +314,10 @@ impl IrisRuntime {
             loop {
                 match cap_debug.recv().await {
                     Ok(ct) => {
-                        println!("CapDebug: recv frames={} roi={} resolution={}", ct.frames_captured, ct.roi_active, ct.resolution);
+                        println!(
+                            "CapDebug: recv frames={} roi={} resolution={}",
+                            ct.frames_captured, ct.roi_active, ct.resolution
+                        );
                     }
                     Err(e) => {
                         println!("CapDebug: recv error: {:?}", e);
@@ -299,7 +344,12 @@ impl IrisRuntime {
             loop {
                 match debug_sub.recv().await {
                     Ok(env) => {
-                        println!("DebugSub: recv ts={} sequence={} event={:?}", Utc::now(), env.sequence, env.event);
+                        println!(
+                            "DebugSub: recv ts={} sequence={} event={:?}",
+                            Utc::now(),
+                            env.sequence,
+                            env.event
+                        );
                     }
                     Err(e) => {
                         println!("DebugSub: recv error ts={} err={:?}", Utc::now(), e);
@@ -365,6 +415,13 @@ impl IrisRuntime {
             println!("Dispatcher: exiting");
         }));
 
-        Ok(Self { app_state, ipc_handle, capture_handle, _tasks: tasks, _capture_telemetry_tx: capture_telemetry_tx.clone(), _capture_telemetry_keepalive: capture_keepalive })
+        Ok(Self {
+            app_state,
+            ipc_handle,
+            capture_handle,
+            _tasks: tasks,
+            _capture_telemetry_tx: capture_telemetry_tx.clone(),
+            _capture_telemetry_keepalive: capture_keepalive,
+        })
     }
 }

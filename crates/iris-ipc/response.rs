@@ -11,7 +11,9 @@ pub enum IpcResponse {
 #[serde(tag = "type", content = "payload")]
 pub enum ResponseData {
     Empty,
-    Pong { uptime_ms: u64 },
+    Pong {
+        uptime_ms: u64,
+    },
     Status {
         capture_state: String,
         device_name: String,
@@ -19,20 +21,37 @@ pub enum ResponseData {
         frame_count: u64,
         subscriber_count: usize,
     },
-    DeviceList { devices: Vec<DeviceEntry> },
-    DeviceCapabilities { capabilities: String },
-    ControlValue { control: String, value: i64 },
-    ControlList { controls: Vec<ControlEntry> },
+    DeviceList {
+        devices: Vec<DeviceEntry>,
+    },
+    DeviceCapabilities {
+        capabilities: String,
+    },
+    ControlValue {
+        control: String,
+        value: i64,
+    },
+    ControlList {
+        controls: Vec<ControlEntry>,
+    },
     StreamStats {
         frames_delivered: u64,
         frames_dropped: u64,
         subscriber_count: usize,
         ring_buffer_usage: f32,
     },
-    SubscriberId { id: u64 },
-    Config { json: String },
-    ProfileSaved { name: String },
-    ProfileLoaded { name: String },
+    SubscriberId {
+        id: u64,
+    },
+    Config {
+        json: String,
+    },
+    ProfileSaved {
+        name: String,
+    },
+    ProfileLoaded {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -1,8 +1,8 @@
 use crate::error::{IrisError, IrisResult};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct IrisConfig {
     pub device: DeviceConfig,
     pub capture: CaptureConfig,
@@ -148,24 +148,15 @@ impl Default for LoggingConfig {
     }
 }
 
-impl Default for IrisConfig {
-    fn default() -> Self {
-        Self {
-            device: DeviceConfig::default(),
-            capture: CaptureConfig::default(),
-            controls: ControlsConfig::default(),
-            stream: StreamConfig::default(),
-            telemetry: TelemetryConfig::default(),
-            ui: UiConfig::default(),
-            logging: LoggingConfig::default(),
-        }
-    }
-}
+// `Default` is derived for `IrisConfig` above.
 
 impl IrisConfig {
     pub fn config_path() -> IrisResult<PathBuf> {
         let exe = std::env::current_exe().map_err(IrisError::Io)?;
-        let mut p = exe.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let mut p = exe
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         p.push("iris.toml");
         Ok(p)
     }
@@ -174,7 +165,8 @@ impl IrisConfig {
         let path = Self::config_path()?;
         if path.exists() {
             let s = std::fs::read_to_string(&path).map_err(IrisError::Io)?;
-            let cfg: IrisConfig = toml::from_str(&s).map_err(|e| IrisError::Config(format!("toml parse: {}", e)))?;
+            let cfg: IrisConfig =
+                toml::from_str(&s).map_err(|e| IrisError::Config(format!("toml parse: {}", e)))?;
             Ok(cfg)
         } else {
             Ok(IrisConfig::default())
@@ -186,7 +178,8 @@ impl IrisConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(IrisError::Io)?;
         }
-        let s = toml::to_string_pretty(self).map_err(|e| IrisError::Config(format!("toml ser: {}", e)))?;
+        let s = toml::to_string_pretty(self)
+            .map_err(|e| IrisError::Config(format!("toml ser: {}", e)))?;
         std::fs::write(&path, s).map_err(IrisError::Io)?;
         Ok(())
     }
@@ -206,16 +199,24 @@ impl IrisConfig {
             return Err(IrisError::Config("pixel_format invalid".to_string()));
         }
         if self.capture.max_queue_depth < 1 {
-            return Err(IrisError::Config("max_queue_depth must be >= 1".to_string()));
+            return Err(IrisError::Config(
+                "max_queue_depth must be >= 1".to_string(),
+            ));
         }
         if !(self.capture.drop_policy == "oldest" || self.capture.drop_policy == "newest") {
-            return Err(IrisError::Config("drop_policy must be 'oldest' or 'newest'".to_string()));
+            return Err(IrisError::Config(
+                "drop_policy must be 'oldest' or 'newest'".to_string(),
+            ));
         }
         if self.stream.ring_buffer_capacity < 2 {
-            return Err(IrisError::Config("ring_buffer_capacity must be >= 2".to_string()));
+            return Err(IrisError::Config(
+                "ring_buffer_capacity must be >= 2".to_string(),
+            ));
         }
         if self.stream.max_subscribers < 1 {
-            return Err(IrisError::Config("max_subscribers must be >= 1".to_string()));
+            return Err(IrisError::Config(
+                "max_subscribers must be >= 1".to_string(),
+            ));
         }
         if !(self.ui.preview_scale > 0.0 && self.ui.preview_scale <= 2.0) {
             return Err(IrisError::Config("preview_scale out of range".to_string()));

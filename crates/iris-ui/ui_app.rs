@@ -1,14 +1,12 @@
 use eframe::egui::{self, CentralPanel, ScrollArea, TopBottomPanel};
-use iris_ipc::telemetry::TelemetryEnvelope;
+use eframe::egui::{ColorImage, TextureHandle};
+use iris_capture::frame::CaptureFrame;
+use iris_capture::service::CaptureHandle;
+use iris_ipc::command::IpcCommand;
+use iris_ipc::response::{DeviceEntry, IpcResponse, ResponseData};
 use iris_ipc::IpcHandle;
 use iris_ipc::LoggedTelemetryReceiver;
-use iris_ipc::command::IpcCommand;
-use iris_ipc::response::{DeviceEntry, ResponseData, IpcResponse};
-use tokio::sync::broadcast;
 use std::sync::{Arc, Mutex};
-use iris_capture::service::CaptureHandle;
-use iris_capture::frame::CaptureFrame;
-use eframe::egui::{TextureHandle, ColorImage};
 
 pub struct IrisApp {
     ipc: Arc<IpcHandle>,
@@ -16,7 +14,7 @@ pub struct IrisApp {
     log: Mutex<Vec<String>>,
     devices: Arc<Mutex<Vec<DeviceEntry>>>,
     selected_device: Arc<Mutex<Option<String>>>,
-    last_frame_info: Arc<Mutex<Option<(u32,u32)>>>,
+    last_frame_info: Arc<Mutex<Option<(u32, u32)>>>,
     capture_rx: Option<tokio::sync::mpsc::Receiver<CaptureFrame>>,
     preview_texture: Option<TextureHandle>,
 }
@@ -24,18 +22,27 @@ pub struct IrisApp {
 impl IrisApp {
     pub fn new(ipc: Arc<IpcHandle>, capture: CaptureHandle) -> Self {
         let telemetry_rx = ipc.subscribe_telemetry();
-        let app = Self { ipc: ipc.clone(), telemetry_rx: Mutex::new(telemetry_rx), log: Mutex::new(Vec::new()), devices: Arc::new(Mutex::new(Vec::new())), selected_device: Arc::new(Mutex::new(None)), last_frame_info: Arc::new(Mutex::new(None)), capture_rx: Some(capture.frame_rx), preview_texture: None };
+        let app = Self {
+            ipc: ipc.clone(),
+            telemetry_rx: Mutex::new(telemetry_rx),
+            log: Mutex::new(Vec::new()),
+            devices: Arc::new(Mutex::new(Vec::new())),
+            selected_device: Arc::new(Mutex::new(None)),
+            last_frame_info: Arc::new(Mutex::new(None)),
+            capture_rx: Some(capture.frame_rx),
+            preview_texture: None,
+        };
 
         // fetch initial device list
         let ipc_clone = ipc.clone();
         let devices_ref = app.devices.clone();
         tokio::spawn(async move {
-            if let Ok(resp) = ipc_clone.send_command(IpcCommand::ListDevices).await {
-                match resp {
-                    IpcResponse::Ok(ResponseData::DeviceList { devices }) => {
-                        if let Ok(mut dv) = devices_ref.lock() { *dv = devices; }
-                    }
-                    _ => {}
+            if let Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) = ipc_clone
+                .send_command(IpcCommand::ListDevices)
+                .await
+            {
+                if let Ok(mut dv) = devices_ref.lock() {
+                    *dv = devices;
                 }
             }
         });
@@ -54,11 +61,16 @@ impl eframe::App for IrisApp {
                     Ok(env) => {
                         let s = format!("{} - {:?}", env.timestamp, env.event);
                         // capture last frame info if present
-                        match &env.event {
-                            iris_ipc::telemetry::TelemetryEvent::FrameCaptured { sequence: _, width, height, size_bytes: _ } => {
-                                if let Ok(mut lf) = self.last_frame_info.lock() { *lf = Some((*width, *height)); }
+                        if let iris_ipc::telemetry::TelemetryEvent::FrameCaptured {
+                            sequence: _,
+                            width,
+                            height,
+                            size_bytes: _,
+                        } = &env.event
+                        {
+                            if let Ok(mut lf) = self.last_frame_info.lock() {
+                                *lf = Some((*width, *height));
                             }
-                            _ => {}
                         }
                         new_entries.push(s);
                     }
@@ -75,7 +87,9 @@ impl eframe::App for IrisApp {
             if let Ok(mut lg) = self.log.lock() {
                 lg.extend(new_entries);
                 let len = lg.len();
-                if len > 1000 { lg.drain(0..len-500); }
+                if len > 1000 {
+                    lg.drain(0..len - 500);
+                }
             }
         }
 
@@ -105,12 +119,11 @@ impl eframe::App for IrisApp {
                         let ipc = Arc::clone(&self.ipc);
                         let devices_ref = self.devices.clone();
                         tokio::spawn(async move {
-                            if let Ok(resp) = ipc.send_command(IpcCommand::ListDevices).await {
-                                match resp {
-                                    IpcResponse::Ok(ResponseData::DeviceList { devices }) => {
-                                        if let Ok(mut dv) = devices_ref.lock() { *dv = devices; }
-                                    }
-                                    _ => {}
+                            if let Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) =
+                                ipc.send_command(IpcCommand::ListDevices).await
+                            {
+                                if let Ok(mut dv) = devices_ref.lock() {
+                                    *dv = devices;
                                 }
                             }
                         });
@@ -126,8 +139,14 @@ impl eframe::App for IrisApp {
                                         let id = dev.id.clone();
                                         let sel = self.selected_device.clone();
                                         tokio::spawn(async move {
-                                            let _ = ipc.send_command(IpcCommand::SelectDevice { device_id: id.clone() }).await;
-                                            if let Ok(mut s) = sel.lock() { *s = Some(id); }
+                                            let _ = ipc
+                                                .send_command(IpcCommand::SelectDevice {
+                                                    device_id: id.clone(),
+                                                })
+                                                .await;
+                                            if let Ok(mut s) = sel.lock() {
+                                                *s = Some(id);
+                                            }
                                         });
                                     }
                                 });
@@ -148,36 +167,58 @@ impl eframe::App for IrisApp {
                                     // convert BGR24 or other formats to RGBA
                                     let w = frame.width as usize;
                                     let h = frame.height as usize;
-                                    let mut pixels: Vec<u8> = Vec::with_capacity(w*h*4);
+                                    let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 4);
                                     match frame.format {
                                         iris_hal::device::PixelFormat::Bgr24 => {
                                             let d = frame.data;
                                             for i in (0..d.len()).step_by(3) {
-                                                let b = d[i]; let g = d[i+1]; let r = d[i+2];
-                                                pixels.push(r); pixels.push(g); pixels.push(b); pixels.push(255);
+                                                let b = d[i];
+                                                let g = d[i + 1];
+                                                let r = d[i + 2];
+                                                pixels.push(r);
+                                                pixels.push(g);
+                                                pixels.push(b);
+                                                pixels.push(255);
                                             }
                                         }
                                         iris_hal::device::PixelFormat::Rgb24 => {
                                             let d = frame.data;
                                             for i in (0..d.len()).step_by(3) {
-                                                let r = d[i]; let g = d[i+1]; let b = d[i+2];
-                                                pixels.push(r); pixels.push(g); pixels.push(b); pixels.push(255);
+                                                let r = d[i];
+                                                let g = d[i + 1];
+                                                let b = d[i + 2];
+                                                pixels.push(r);
+                                                pixels.push(g);
+                                                pixels.push(b);
+                                                pixels.push(255);
                                             }
                                         }
-                                            // Other formats not explicitly handled fall through
+                                        // Other formats not explicitly handled fall through
                                         _ => {}
                                     }
 
-                                    if pixels.len() == w*h*4 {
-                                        let image = ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &pixels);
+                                    if pixels.len() == w * h * 4 {
+                                        let image = ColorImage::from_rgba_unmultiplied(
+                                            [frame.width as usize, frame.height as usize],
+                                            &pixels,
+                                        );
                                         // create or replace texture
-                                        let tex = ctx.load_texture("iris_preview", image, egui::TextureOptions::LINEAR);
+                                        let tex = ctx.load_texture(
+                                            "iris_preview",
+                                            image,
+                                            egui::TextureOptions::LINEAR,
+                                        );
                                         self.preview_texture = Some(tex);
-                                        if let Ok(mut lf) = self.last_frame_info.lock() { *lf = Some((frame.width, frame.height)); }
+                                        if let Ok(mut lf) = self.last_frame_info.lock() {
+                                            *lf = Some((frame.width, frame.height));
+                                        }
                                     }
                                 }
                                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                                Err(_) => { self.capture_rx = None; break; }
+                                Err(_) => {
+                                    self.capture_rx = None;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -186,12 +227,18 @@ impl eframe::App for IrisApp {
                         let size = tex.size();
                         let w = size[0] as f32;
                         let h = size[1] as f32;
-                        ui.add(egui::Image::new(&*tex).fit_to_exact_size(egui::vec2(w.min(640.0), h.min(360.0))));
+                        ui.add(
+                            egui::Image::new(tex)
+                                .fit_to_exact_size(egui::vec2(w.min(640.0), h.min(360.0))),
+                        );
                     } else if let Ok(lf) = self.last_frame_info.lock() {
-                        if let Some((w,h)) = *lf { ui.label(format!("Last frame: {}x{}", w, h)); } else { ui.label("No frames yet"); }
+                        if let Some((w, h)) = *lf {
+                            ui.label(format!("Last frame: {}x{}", w, h));
+                        } else {
+                            ui.label("No frames yet");
+                        }
                     }
                 });
-
             });
 
             ui.separator();

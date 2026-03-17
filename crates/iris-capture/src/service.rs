@@ -1,14 +1,14 @@
 use crate::backend::{CaptureBackend, CaptureConfig, DropPolicy};
 use crate::frame::{CaptureFrame, Roi};
 use crate::telemetry::CaptureTelemetry;
+use chrono::Utc;
 use iris_core::error::IrisResult;
 use iris_hal::device::PixelFormat;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::collections::VecDeque;
-use tokio::sync::{broadcast, mpsc, watch, Notify, Mutex};
-use tracing::{debug, info, warn};
-use chrono::Utc;
+use tokio::sync::{broadcast, mpsc, watch, Mutex, Notify};
+use tracing::debug;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureServiceState {
@@ -50,8 +50,11 @@ pub enum CaptureCommand {
 
 impl CaptureHandle {
     pub async fn send(&self, cmd: CaptureCommand) -> IrisResult<()> {
-        self.cmd_tx.send(cmd).await.map_err(|e| iris_core::error::IrisError::Ipc(format!("cmd send failed: {}", e)))?;
-        Ok(().into())
+        self.cmd_tx
+            .send(cmd)
+            .await
+            .map_err(|e| iris_core::error::IrisError::Ipc(format!("cmd send failed: {}", e)))?;
+        Ok(())
     }
 
     pub fn command_sender(&self) -> mpsc::Sender<CaptureCommand> {
@@ -62,13 +65,21 @@ impl CaptureHandle {
         self.state_rx.borrow().clone()
     }
 
-    pub fn frame_count(&self) -> u64 { self.frame_count.load(Ordering::Relaxed) }
-    pub fn drop_count(&self) -> u64 { self.drop_count.load(Ordering::Relaxed) }
+    pub fn frame_count(&self) -> u64 {
+        self.frame_count.load(Ordering::Relaxed)
+    }
+    pub fn drop_count(&self) -> u64 {
+        self.drop_count.load(Ordering::Relaxed)
+    }
 }
 
 impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
-    pub fn new(backend: B, config: CaptureConfig, telemetry_tx: broadcast::Sender<CaptureTelemetry>) -> (Self, CaptureHandle) {
-            let (out_tx, frame_rx) = mpsc::channel(config.max_queue_depth);
+    pub fn new(
+        backend: B,
+        config: CaptureConfig,
+        telemetry_tx: broadcast::Sender<CaptureTelemetry>,
+    ) -> (Self, CaptureHandle) {
+        let (out_tx, frame_rx) = mpsc::channel(config.max_queue_depth);
         let (cmd_tx, _cmd_rx) = mpsc::channel(8);
         let (state_tx, state_rx) = watch::channel(CaptureServiceState::Idle);
         let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(config.max_queue_depth)));
@@ -84,7 +95,13 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
             buffer: buffer.clone(),
             notify: notify.clone(),
         };
-        let handle = CaptureHandle { frame_rx, cmd_tx, state_rx, frame_count: svc.frame_count.clone(), drop_count: svc.drop_count.clone() };
+        let handle = CaptureHandle {
+            frame_rx,
+            cmd_tx,
+            state_rx,
+            frame_count: svc.frame_count.clone(),
+            drop_count: svc.drop_count.clone(),
+        };
 
         // Spawn forwarder task: move frames from internal buffer to the external channel
         tokio::spawn(async move {
@@ -114,7 +131,12 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
     }
 
     pub async fn run(mut self, mut cmd_rx: mpsc::Receiver<CaptureCommand>) {
-        if let Err(e) = self.backend.start().await { self.state_tx.send(CaptureServiceState::Error(format!("start failed: {}", e))).ok(); return; }
+        if let Err(e) = self.backend.start().await {
+            self.state_tx
+                .send(CaptureServiceState::Error(format!("start failed: {}", e)))
+                .ok();
+            return;
+        }
         self.state_tx.send(CaptureServiceState::Capturing).ok();
 
         loop {
@@ -201,14 +223,14 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
 impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
     fn apply_roi(frame: &mut CaptureFrame, roi: Roi) {
         match frame.format {
-                PixelFormat::Rgb24 | PixelFormat::Bgr24 => {
+            PixelFormat::Rgb24 | PixelFormat::Bgr24 => {
                 let bpp = 3usize;
                 let src_w = frame.width as usize;
-                    let roi_x = roi.x as usize;
-                    let roi_y = roi.y as usize;
-                    let roi_w = roi.width as usize;
-                    let roi_h = roi.height as usize;
-                    let src_stride = src_w * bpp;
+                let roi_x = roi.x as usize;
+                let roi_y = roi.y as usize;
+                let roi_w = roi.width as usize;
+                let roi_h = roi.height as usize;
+                let src_stride = src_w * bpp;
                 let mut out = Vec::with_capacity(roi_w * roi_h * bpp);
                 for row in 0..roi_h {
                     let src_row = roi_y + row;
@@ -223,93 +245,99 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
                 frame.height = roi.height;
                 frame.is_cropped = true;
             }
-                PixelFormat::Yuyv => {
-                    // packed YUYV (YUY2) 2 bytes per pixel
-                    let bpp = 2usize;
-                    let src_w = frame.width as usize;
-                    let roi_x = roi.x as usize;
-                    let roi_y = roi.y as usize;
-                    let roi_w = roi.width as usize;
-                    let roi_h = roi.height as usize;
-                    let src_stride = src_w * bpp;
-                    let mut out = Vec::with_capacity(roi_w * roi_h * bpp);
-                    for row in 0..roi_h {
-                        let src_row = roi_y + row;
-                        let start = src_row * src_stride + roi_x * bpp;
-                        let end = start + roi_w * bpp;
-                        if end <= frame.data.len() {
-                            out.extend_from_slice(&frame.data[start..end]);
-                        }
+            PixelFormat::Yuyv => {
+                // packed YUYV (YUY2) 2 bytes per pixel
+                let bpp = 2usize;
+                let src_w = frame.width as usize;
+                let roi_x = roi.x as usize;
+                let roi_y = roi.y as usize;
+                let roi_w = roi.width as usize;
+                let roi_h = roi.height as usize;
+                let src_stride = src_w * bpp;
+                let mut out = Vec::with_capacity(roi_w * roi_h * bpp);
+                for row in 0..roi_h {
+                    let src_row = roi_y + row;
+                    let start = src_row * src_stride + roi_x * bpp;
+                    let end = start + roi_w * bpp;
+                    if end <= frame.data.len() {
+                        out.extend_from_slice(&frame.data[start..end]);
                     }
-                    frame.data = out;
-                    frame.width = roi.width;
-                    frame.height = roi.height;
-                    frame.is_cropped = true;
                 }
-                PixelFormat::Nv12 => {
-                    // NV12 layout: Y plane (W*H), followed by interleaved UV plane (W * H / 2)
-                    let src_w = frame.width as usize;
-                    let src_h = frame.height as usize;
-                    let roi_x = roi.x as usize;
-                    let roi_y = roi.y as usize;
-                    let roi_w = roi.width as usize;
-                    let roi_h = roi.height as usize;
+                frame.data = out;
+                frame.width = roi.width;
+                frame.height = roi.height;
+                frame.is_cropped = true;
+            }
+            PixelFormat::Nv12 => {
+                // NV12 layout: Y plane (W*H), followed by interleaved UV plane (W * H / 2)
+                let src_w = frame.width as usize;
+                let src_h = frame.height as usize;
+                let roi_x = roi.x as usize;
+                let roi_y = roi.y as usize;
+                let roi_w = roi.width as usize;
+                let roi_h = roi.height as usize;
 
-                    // Auto-adjust ROI to even alignment for NV12 (2x2 chroma subsampling)
-                    let adj_x = roi_x & !1usize;
-                    let adj_y = roi_y & !1usize;
-                    // make width/height even by rounding down
-                    let mut adj_w = roi_w & !1usize;
-                    let mut adj_h = roi_h & !1usize;
+                // Auto-adjust ROI to even alignment for NV12 (2x2 chroma subsampling)
+                let adj_x = roi_x & !1usize;
+                let adj_y = roi_y & !1usize;
+                // make width/height even by rounding down
+                let mut adj_w = roi_w & !1usize;
+                let mut adj_h = roi_h & !1usize;
 
-                    // clamp to source bounds and ensure evenness
-                    if adj_x >= src_w { frame.is_cropped = false; return; }
-                    if adj_y >= src_h { frame.is_cropped = false; return; }
-                    if adj_x + adj_w > src_w {
-                        adj_w = src_w.saturating_sub(adj_x) & !1usize;
-                    }
-                    if adj_y + adj_h > src_h {
-                        adj_h = src_h.saturating_sub(adj_y) & !1usize;
-                    }
-
-                    if adj_w == 0 || adj_h == 0 {
-                        frame.is_cropped = false;
-                        return;
-                    }
-
-                    let y_stride = src_w;
-                    let uv_stride = src_w; // UV row is src_w bytes (u,v pairs)
-                    let y_plane_size = src_w * src_h;
-                    // copy Y rows
-                    let mut out_y = Vec::with_capacity(adj_w * adj_h);
-                    for row in 0..adj_h {
-                        let src_row = adj_y + row;
-                        let start = src_row * y_stride + adj_x;
-                        let end = start + adj_w;
-                        if end <= y_plane_size && end <= frame.data.len() {
-                            out_y.extend_from_slice(&frame.data[start..end]);
-                        }
-                    }
-                    // copy UV rows (each UV row corresponds to two Y rows)
-                    let mut out_uv = Vec::with_capacity((adj_w/2) * (adj_h/2) * 2);
-                    let uv_plane_offset = y_plane_size;
-                    let uv_row_start = adj_y / 2;
-                    let uv_rows = adj_h / 2;
-                    let uv_x = adj_x / 2;
-                    let uv_w = adj_w / 2;
-                    for row in 0..uv_rows {
-                        let src_row = uv_row_start + row;
-                        let start = uv_plane_offset + src_row * uv_stride + uv_x * 2;
-                        let end = start + uv_w * 2;
-                        if end <= frame.data.len() {
-                            out_uv.extend_from_slice(&frame.data[start..end]);
-                        }
-                    }
-                    frame.data = [out_y, out_uv].concat();
-                    frame.width = adj_w as u32;
-                    frame.height = adj_h as u32;
-                    frame.is_cropped = true;
+                // clamp to source bounds and ensure evenness
+                if adj_x >= src_w {
+                    frame.is_cropped = false;
+                    return;
                 }
+                if adj_y >= src_h {
+                    frame.is_cropped = false;
+                    return;
+                }
+                if adj_x + adj_w > src_w {
+                    adj_w = src_w.saturating_sub(adj_x) & !1usize;
+                }
+                if adj_y + adj_h > src_h {
+                    adj_h = src_h.saturating_sub(adj_y) & !1usize;
+                }
+
+                if adj_w == 0 || adj_h == 0 {
+                    frame.is_cropped = false;
+                    return;
+                }
+
+                let y_stride = src_w;
+                let uv_stride = src_w; // UV row is src_w bytes (u,v pairs)
+                let y_plane_size = src_w * src_h;
+                // copy Y rows
+                let mut out_y = Vec::with_capacity(adj_w * adj_h);
+                for row in 0..adj_h {
+                    let src_row = adj_y + row;
+                    let start = src_row * y_stride + adj_x;
+                    let end = start + adj_w;
+                    if end <= y_plane_size && end <= frame.data.len() {
+                        out_y.extend_from_slice(&frame.data[start..end]);
+                    }
+                }
+                // copy UV rows (each UV row corresponds to two Y rows)
+                let mut out_uv = Vec::with_capacity((adj_w / 2) * (adj_h / 2) * 2);
+                let uv_plane_offset = y_plane_size;
+                let uv_row_start = adj_y / 2;
+                let uv_rows = adj_h / 2;
+                let uv_x = adj_x / 2;
+                let uv_w = adj_w / 2;
+                for row in 0..uv_rows {
+                    let src_row = uv_row_start + row;
+                    let start = uv_plane_offset + src_row * uv_stride + uv_x * 2;
+                    let end = start + uv_w * 2;
+                    if end <= frame.data.len() {
+                        out_uv.extend_from_slice(&frame.data[start..end]);
+                    }
+                }
+                frame.data = [out_y, out_uv].concat();
+                frame.width = adj_w as u32;
+                frame.height = adj_h as u32;
+                frame.is_cropped = true;
+            }
         }
     }
 }

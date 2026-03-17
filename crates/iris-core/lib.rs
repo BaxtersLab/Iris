@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Iris — iris-core
 
-pub mod config;
 pub mod app;
-pub mod logging;
+pub mod config;
 pub mod error;
+pub mod logging;
 
 #[cfg(test)]
 mod tests {
-    use super::config::IrisConfig;
     use super::app::{AppState, CaptureState};
-    use serde::{Serialize, Deserialize};
+    use super::config::IrisConfig;
+    use serde::{Deserialize, Serialize};
     use toml;
 
     #[test]

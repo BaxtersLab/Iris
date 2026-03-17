@@ -1,6 +1,6 @@
-use tokio::sync::watch;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use serde::{Serialize, Deserialize};
+use tokio::sync::watch;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CaptureState {

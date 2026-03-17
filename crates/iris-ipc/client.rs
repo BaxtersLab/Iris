@@ -1,7 +1,7 @@
 use crate::command::IpcCommand;
 use crate::response::IpcResponse;
-use iris_core::error::IrisResult;
 use crate::server::IpcHandle;
+use iris_core::error::IrisResult;
 
 pub struct IpcClient {
     handle: IpcHandle,
@@ -33,7 +33,9 @@ impl IpcClient {
     }
 
     pub async fn select_device(&self, id: String) -> IrisResult<IpcResponse> {
-        self.handle.send_command(IpcCommand::SelectDevice { device_id: id }).await
+        self.handle
+            .send_command(IpcCommand::SelectDevice { device_id: id })
+            .await
     }
 
     pub async fn subscribe(&self) -> IrisResult<IpcResponse> {
@@ -41,6 +43,8 @@ impl IpcClient {
     }
 
     pub async fn unsubscribe(&self, id: u64) -> IrisResult<IpcResponse> {
-        self.handle.send_command(IpcCommand::Unsubscribe { subscriber_id: id }).await
+        self.handle
+            .send_command(IpcCommand::Unsubscribe { subscriber_id: id })
+            .await
     }
 }

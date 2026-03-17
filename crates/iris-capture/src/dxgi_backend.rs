@@ -3,17 +3,17 @@
 use async_trait::async_trait;
 use tracing::info;
 
-use windows::Win32::Graphics::Dxgi::*;
-use windows::Win32::Graphics::Dxgi::Common::*;
-use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Direct3D::*;
 use windows::core::Interface;
+use windows::Win32::Graphics::Direct3D::*;
+use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::Dxgi::Common::*;
+use windows::Win32::Graphics::Dxgi::*;
 
+use crate::backend::CaptureBackend;
+use crate::backend::CaptureConfig;
+use crate::frame::CaptureFrame;
 use iris_core::error::{IrisError, IrisResult};
 use iris_hal::device::PixelFormat;
-use crate::frame::CaptureFrame;
-use crate::backend::CaptureConfig;
-use crate::backend::CaptureBackend;
 
 pub struct DxgiCaptureBackend {
     device: Option<ID3D11Device>,
@@ -53,10 +53,12 @@ impl CaptureBackend for DxgiCaptureBackend {
             let factory: IDXGIFactory1 = CreateDXGIFactory1()
                 .map_err(|e| IrisError::Capture(format!("CreateDXGIFactory1: {e:?}")))?;
 
-            let adapter: IDXGIAdapter1 = factory.EnumAdapters1(0)
+            let adapter: IDXGIAdapter1 = factory
+                .EnumAdapters1(0)
                 .map_err(|e| IrisError::Capture(format!("EnumAdapters1: {e:?}")))?;
 
-            let output: IDXGIOutput = adapter.EnumOutputs(0)
+            let output: IDXGIOutput = adapter
+                .EnumOutputs(0)
                 .map_err(|e| IrisError::Capture(format!("EnumOutputs: {e:?}")))?;
 
             // Use configured capture size; desktop query omitted to avoid
@@ -66,30 +68,48 @@ impl CaptureBackend for DxgiCaptureBackend {
             let mut context: Option<ID3D11DeviceContext> = None;
 
             // Use None for adapter/software/feature-levels to match windows-rs signatures
-            D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, None, D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context))
-                .map_err(|e| IrisError::Capture(format!("D3D11CreateDevice: {e:?}")))?;
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                None,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+            .map_err(|e| IrisError::Capture(format!("D3D11CreateDevice: {e:?}")))?;
 
             let device = device.ok_or(IrisError::Capture("D3D11 device is None".into()))?;
             let context = context.ok_or(IrisError::Capture("D3D11 context is None".into()))?;
 
-            let output1: IDXGIOutput1 = output.cast().map_err(|e| IrisError::Capture(format!("Cast to IDXGIOutput1: {e:?}")))?;
-            let duplication = output1.DuplicateOutput(&device).map_err(|e| IrisError::Capture(format!("DuplicateOutput: {e:?}")))?;
+            let output1: IDXGIOutput1 = output
+                .cast()
+                .map_err(|e| IrisError::Capture(format!("Cast to IDXGIOutput1: {e:?}")))?;
+            let duplication = output1
+                .DuplicateOutput(&device)
+                .map_err(|e| IrisError::Capture(format!("DuplicateOutput: {e:?}")))?;
 
-            let mut tex_desc = D3D11_TEXTURE2D_DESC::default();
-            tex_desc.Width = self.width;
-            tex_desc.Height = self.height;
-            tex_desc.MipLevels = 1;
-            tex_desc.ArraySize = 1;
-            tex_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-            tex_desc.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
-            tex_desc.Usage = D3D11_USAGE_STAGING;
-            tex_desc.BindFlags = 0;
-            tex_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-            tex_desc.MiscFlags = 0;
+            let tex_desc = D3D11_TEXTURE2D_DESC {
+                Width: self.width,
+                Height: self.height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+            };
 
             let mut staging_opt: Option<ID3D11Texture2D> = None;
-            device.CreateTexture2D(&tex_desc, None, Some(&mut staging_opt)).map_err(|e| IrisError::Capture(format!("CreateTexture2D: {e:?}")))?;
-            let staging = staging_opt.ok_or(IrisError::Capture("CreateTexture2D returned None".into()))?;
+            device
+                .CreateTexture2D(&tex_desc, None, Some(&mut staging_opt))
+                .map_err(|e| IrisError::Capture(format!("CreateTexture2D: {e:?}")))?;
+            let staging =
+                staging_opt.ok_or(IrisError::Capture("CreateTexture2D returned None".into()))?;
 
             self.device = Some(device);
             self.device_context = Some(context);
@@ -119,23 +139,41 @@ impl CaptureBackend for DxgiCaptureBackend {
         }
 
         unsafe {
-            let duplication = self.duplication.as_ref().ok_or(IrisError::Capture("no duplication".into()))?;
-            let context = self.device_context.as_ref().ok_or(IrisError::Capture("no context".into()))?;
-            let staging = self.staging_texture.as_ref().ok_or(IrisError::Capture("no staging texture".into()))?;
+            let duplication = self
+                .duplication
+                .as_ref()
+                .ok_or(IrisError::Capture("no duplication".into()))?;
+            let context = self
+                .device_context
+                .as_ref()
+                .ok_or(IrisError::Capture("no context".into()))?;
+            let staging = self
+                .staging_texture
+                .as_ref()
+                .ok_or(IrisError::Capture("no staging texture".into()))?;
 
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut desktop_resource: Option<IDXGIResource> = None;
 
-            duplication.AcquireNextFrame(500, &mut frame_info, &mut desktop_resource).map_err(|e| IrisError::Capture(format!("AcquireNextFrame: {e:?}")))?;
+            duplication
+                .AcquireNextFrame(500, &mut frame_info, &mut desktop_resource)
+                .map_err(|e| IrisError::Capture(format!("AcquireNextFrame: {e:?}")))?;
 
-            let desktop_resource = desktop_resource.ok_or(IrisError::Capture("Desktop resource is None".into()))?;
-            let desktop_texture: ID3D11Texture2D = desktop_resource.cast().map_err(|e| IrisError::Capture(format!("Cast to Texture2D: {e:?}")))?;
+            let desktop_resource =
+                desktop_resource.ok_or(IrisError::Capture("Desktop resource is None".into()))?;
+            let desktop_texture: ID3D11Texture2D = desktop_resource
+                .cast()
+                .map_err(|e| IrisError::Capture(format!("Cast to Texture2D: {e:?}")))?;
 
             context.CopyResource(staging, &desktop_texture);
-            duplication.ReleaseFrame().map_err(|e| IrisError::Capture(format!("ReleaseFrame: {e:?}")))?;
+            duplication
+                .ReleaseFrame()
+                .map_err(|e| IrisError::Capture(format!("ReleaseFrame: {e:?}")))?;
 
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).map_err(|e| IrisError::Capture(format!("Map: {e:?}")))?;
+            context
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .map_err(|e| IrisError::Capture(format!("Map: {e:?}")))?;
 
             let src_stride = mapped.RowPitch as usize;
             // We'll produce BGR24 output by dropping alpha from BGRA8

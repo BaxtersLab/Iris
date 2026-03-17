@@ -14,7 +14,10 @@ mod tests {
     #[tokio::test]
     async fn probe_capabilities_succeeds() {
         let backend = MockUvcBackend::new();
-        let caps = backend.probe_capabilities(&DeviceId("mock-0".into())).await.unwrap();
+        let caps = backend
+            .probe_capabilities(&DeviceId("mock-0".into()))
+            .await
+            .unwrap();
         assert!(!caps.formats.is_empty());
     }
 
@@ -59,7 +62,10 @@ mod tests {
             return;
         }
         let backend = crate::backend::new_wmf_backend().expect("WmfBackend::new() failed");
-        let devs = backend.enumerate_devices().await.expect("enumerate_devices failed");
+        let devs = backend
+            .enumerate_devices()
+            .await
+            .expect("enumerate_devices failed");
         eprintln!("WMF devices found: {}", devs.len());
         for d in &devs {
             eprintln!("  {} — {}", d.id, d.name);

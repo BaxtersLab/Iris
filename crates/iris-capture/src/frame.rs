@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use iris_hal::device::PixelFormat;
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]

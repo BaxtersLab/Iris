@@ -1,7 +1,7 @@
 use crate::error::{IrisError, IrisResult};
 use tracing_subscriber::fmt;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::EnvFilter;
 
 pub fn init_logging(level: &str, log_to_file: bool, log_dir: &str) -> IrisResult<()> {
     // Basic stdout logging with level filter
@@ -16,7 +16,7 @@ pub fn init_logging(level: &str, log_to_file: bool, log_dir: &str) -> IrisResult
 
     if log_to_file {
         // Ensure log directory exists; detailed file logging will be added in integration.
-        let _ = std::fs::create_dir_all(log_dir).map_err(IrisError::Io)?;
+        std::fs::create_dir_all(log_dir).map_err(IrisError::Io)?;
     }
 
     Ok(())

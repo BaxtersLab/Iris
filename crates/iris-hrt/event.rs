@@ -46,4 +46,3 @@ pub enum HrtStatus {
     Monitoring,
     Stopped,
 }
-

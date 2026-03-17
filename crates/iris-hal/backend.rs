@@ -1,4 +1,6 @@
-use crate::device::{ControlCapabilityInfo, DeviceId, DeviceInfo, DeviceCapabilities, FormatDescriptor};
+use crate::device::{
+    ControlCapabilityInfo, DeviceCapabilities, DeviceId, DeviceInfo, FormatDescriptor,
+};
 use crate::error::{HalError, HalResult};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
@@ -26,13 +28,21 @@ pub struct MockUvcBackend {
 
 impl MockUvcBackend {
     pub fn new() -> Self {
-        let dev = DeviceInfo { id: DeviceId("mock-0".into()), name: "Mock Camera".into() };
+        let dev = DeviceInfo {
+            id: DeviceId("mock-0".into()),
+            name: "Mock Camera".into(),
+        };
         let caps = {
             let mut map = HashMap::new();
             map.insert(
                 dev.id.0.clone(),
                 DeviceCapabilities {
-                    formats: vec![FormatDescriptor { width: 640, height: 480, fps: 30, pixel_format: crate::device::PixelFormat::Rgb24 }],
+                    formats: vec![FormatDescriptor {
+                        width: 640,
+                        height: 480,
+                        fps: 30,
+                        pixel_format: crate::device::PixelFormat::Rgb24,
+                    }],
                 },
             );
             map
@@ -47,6 +57,12 @@ impl MockUvcBackend {
     }
 }
 
+impl Default for MockUvcBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl UvcBackend for MockUvcBackend {
     async fn enumerate_devices(&self) -> HalResult<Vec<DeviceInfo>> {
@@ -54,7 +70,10 @@ impl UvcBackend for MockUvcBackend {
     }
 
     async fn probe_capabilities(&self, id: &DeviceId) -> HalResult<DeviceCapabilities> {
-        self.caps.get(&id.0).cloned().ok_or(HalError::DeviceNotFound)
+        self.caps
+            .get(&id.0)
+            .cloned()
+            .ok_or(HalError::DeviceNotFound)
     }
 
     async fn open_device(&self, id: &DeviceId) -> HalResult<()> {
@@ -81,14 +100,24 @@ impl UvcBackend for MockUvcBackend {
         }
         // return a synthetic RGB frame (all zeroes)
         let caps = self.caps.get(&id.0).ok_or(HalError::DeviceNotFound)?;
-        let fmt = caps.formats.get(0).ok_or(HalError::InvalidParameter("no format".into()))?;
+        let fmt = caps
+            .formats
+            .first()
+            .ok_or(HalError::InvalidParameter("no format".into()))?;
         let size = (fmt.width * fmt.height * 3) as usize;
         Ok(vec![0u8; size])
     }
 
     async fn list_controls(&self, id: &DeviceId) -> HalResult<Vec<ControlCapabilityInfo>> {
         let _caps = self.caps.get(&id.0).ok_or(HalError::DeviceNotFound)?;
-        Ok(vec![ControlCapabilityInfo { id: 1, name: "Brightness".into(), min: 0, max: 255, step: 1, default: 128 }])
+        Ok(vec![ControlCapabilityInfo {
+            id: 1,
+            name: "Brightness".into(),
+            min: 0,
+            max: 255,
+            step: 1,
+            default: 128,
+        }])
     }
 
     async fn get_control(&self, id: &DeviceId, control_id: u32) -> HalResult<i64> {
@@ -129,22 +158,15 @@ mod wmf {
         GUID::from_u128(0x58f0aad8_22bf_4f8a_bb3d_d2c4978c6e2f);
 
     // Media type attributes
-    const MF_MT_SUBTYPE: GUID =
-        GUID::from_u128(0xf7e34c9a_42e8_4714_b74b_cb29d72c35e5);
-    const MF_MT_FRAME_SIZE: GUID =
-        GUID::from_u128(0x1652c33d_d6b2_4012_b834_72030849a37d);
-    const MF_MT_FRAME_RATE: GUID =
-        GUID::from_u128(0xc459a2e8_3d2c_4e44_b132_fee5156c7bb0);
+    const MF_MT_SUBTYPE: GUID = GUID::from_u128(0xf7e34c9a_42e8_4714_b74b_cb29d72c35e5);
+    const MF_MT_FRAME_SIZE: GUID = GUID::from_u128(0x1652c33d_d6b2_4012_b834_72030849a37d);
+    const MF_MT_FRAME_RATE: GUID = GUID::from_u128(0xc459a2e8_3d2c_4e44_b132_fee5156c7bb0);
 
     // Well-known subtype GUIDs
-    const MF_VIDEO_FORMAT_NV12: GUID =
-        GUID::from_u128(0x3231564e_0000_0010_8000_00aa00389b71);
-    const MF_VIDEO_FORMAT_YUY2: GUID =
-        GUID::from_u128(0x32595559_0000_0010_8000_00aa00389b71);
-    const MF_VIDEO_FORMAT_RGB24: GUID =
-        GUID::from_u128(0x00000014_0000_0010_8000_00aa00389b71);
-    const MF_VIDEO_FORMAT_RGB32: GUID =
-        GUID::from_u128(0x00000016_0000_0010_8000_00aa00389b71);
+    const MF_VIDEO_FORMAT_NV12: GUID = GUID::from_u128(0x3231564e_0000_0010_8000_00aa00389b71);
+    const MF_VIDEO_FORMAT_YUY2: GUID = GUID::from_u128(0x32595559_0000_0010_8000_00aa00389b71);
+    const MF_VIDEO_FORMAT_RGB24: GUID = GUID::from_u128(0x00000014_0000_0010_8000_00aa00389b71);
+    const MF_VIDEO_FORMAT_RGB32: GUID = GUID::from_u128(0x00000016_0000_0010_8000_00aa00389b71);
 
     const MF_SOURCE_READER_FIRST_VIDEO_STREAM: u32 = 0xFFFFFFFC;
 
@@ -265,10 +287,7 @@ mod wmf {
         }
         let mut buf = vec![0u16; (len + 1) as usize];
         let mut actual = 0u32;
-        if activate
-            .GetString(key, &mut buf, Some(&mut actual))
-            .is_ok()
-        {
+        if activate.GetString(key, &mut buf, Some(&mut actual)).is_ok() {
             Some(String::from_utf16_lossy(&buf[..actual as usize]))
         } else {
             None
@@ -290,7 +309,11 @@ mod wmf {
             .map(|r| {
                 let num = (r >> 32) as u32;
                 let den = (r & 0xFFFFFFFF) as u32;
-                if den > 0 { num / den } else { 30 }
+                if den > 0 {
+                    num / den
+                } else {
+                    30
+                }
             })
             .unwrap_or(30);
 
@@ -309,9 +332,8 @@ mod wmf {
                 let activates = enumerate_video_devices()?;
                 let mut devices = Vec::new();
                 for (i, act) in activates.iter().enumerate() {
-                    let name =
-                        get_activate_string(act, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME)
-                            .unwrap_or_else(|| format!("Unknown Device {i}"));
+                    let name = get_activate_string(act, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME)
+                        .unwrap_or_else(|| format!("Unknown Device {i}"));
                     let symlink = get_activate_string(
                         act,
                         &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
@@ -347,24 +369,18 @@ mod wmf {
                 let source: IMFMediaSource = activate
                     .ActivateObject()
                     .map_err(|e| HalError::Io(format!("ActivateObject: {e}")))?;
-                let reader: IMFSourceReader =
-                    MFCreateSourceReaderFromMediaSource(&source, None)
-                        .map_err(|e| HalError::Io(format!("CreateSourceReader: {e}")))?;
+                let reader: IMFSourceReader = MFCreateSourceReaderFromMediaSource(&source, None)
+                    .map_err(|e| HalError::Io(format!("CreateSourceReader: {e}")))?;
 
                 let mut formats = Vec::new();
                 let mut idx = 0u32;
-                loop {
-                    match reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, idx) {
-                        Ok(media_type) => {
-                            if let Some(fd) = media_type_to_format(&media_type) {
-                                if !formats.contains(&fd) {
-                                    formats.push(fd);
-                                }
-                            }
-                            idx += 1;
+                while let Ok(media_type) = reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, idx) {
+                    if let Some(fd) = media_type_to_format(&media_type) {
+                        if !formats.contains(&fd) {
+                            formats.push(fd);
                         }
-                        Err(_) => break,
                     }
+                    idx += 1;
                 }
                 let _ = source.Shutdown();
                 Ok::<_, HalError>(DeviceCapabilities { formats })
@@ -397,9 +413,8 @@ mod wmf {
                 let source: IMFMediaSource = activate
                     .ActivateObject()
                     .map_err(|e| HalError::Io(format!("ActivateObject: {e}")))?;
-                let reader: IMFSourceReader =
-                    MFCreateSourceReaderFromMediaSource(&source, None)
-                        .map_err(|e| HalError::Io(format!("CreateSourceReader: {e}")))?;
+                let reader: IMFSourceReader = MFCreateSourceReaderFromMediaSource(&source, None)
+                    .map_err(|e| HalError::Io(format!("CreateSourceReader: {e}")))?;
 
                 let current_type = reader
                     .GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM)
@@ -453,7 +468,9 @@ mod wmf {
             struct AssertSend<F>(F);
             unsafe impl<F> Send for AssertSend<F> {}
             impl<F: FnOnce() -> T, T> AssertSend<F> {
-                fn call(self) -> T { (self.0)() }
+                fn call(self) -> T {
+                    (self.0)()
+                }
             }
 
             let closure = AssertSend(move || unsafe {
@@ -461,7 +478,8 @@ mod wmf {
                 let mut timestamp = 0i64;
                 let mut stream_idx = 0u32;
                 let mut sample: Option<IMFSample> = None;
-                reader.0
+                reader
+                    .0
                     .ReadSample(
                         MF_SOURCE_READER_FIRST_VIDEO_STREAM,
                         0,
@@ -472,8 +490,7 @@ mod wmf {
                     )
                     .map_err(|e| HalError::Io(format!("ReadSample: {e}")))?;
 
-                let sample =
-                    sample.ok_or(HalError::Io("ReadSample returned no sample".into()))?;
+                let sample = sample.ok_or(HalError::Io("ReadSample returned no sample".into()))?;
 
                 let buffer: IMFMediaBuffer = sample
                     .ConvertToContiguousBuffer()
@@ -496,8 +513,8 @@ mod wmf {
             });
 
             tokio::task::spawn_blocking(move || closure.call())
-            .await
-            .map_err(|e| HalError::Io(format!("spawn_blocking: {e}")))?
+                .await
+                .map_err(|e| HalError::Io(format!("spawn_blocking: {e}")))?
         }
 
         async fn list_controls(&self, _id: &DeviceId) -> HalResult<Vec<ControlCapabilityInfo>> {
