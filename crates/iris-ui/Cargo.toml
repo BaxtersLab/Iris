@@ -1,0 +1,31 @@
+[package]
+name = "iris-ui"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[[bin]]
+name = "iris-ui"
+path = "main.rs"
+
+[dependencies]
+iris-core = { path = "../iris-core" }
+iris-ipc = { path = "../iris-ipc" }
+iris-hrt = { path = "../iris-hrt" }
+iris-hal = { path = "../iris-hal" }
+iris-capture = { path = "../iris-capture" }
+iris-control = { path = "../iris-control" }
+iris-stream = { path = "../iris-stream" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+eframe = "0.27"
+egui = "0.27"
+tray-icon = "0.13"
+global-hotkey = "0.4"
+tracing-subscriber = "0.3"

@@ -1,0 +1,18 @@
+[package]
+name = "iris-control"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+iris-core = { path = "../iris-core" }
+iris-ipc = { path = "../iris-ipc" }
+iris-hal = { path = "../iris-hal" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,304 @@
+Iris — 4K Vision Interface Module for RemoteDexter
+A stand‑alone, deterministic, telemetry‑rich Rust subsystem providing high‑fidelity visual input to agentic systems.
+
+Purpose
+Iris is a hardware‑level vision interface designed for the RemoteDexter ecospace. It exposes a stable, high‑performance, cross‑platform Rust API for capturing, preprocessing, and streaming 4K video frames from a USB webcam. Iris does not perform inference, recognition, or cognitive tasks. Instead, it provides clean, structured, timestamped visual data to upstream intelligent agents, who layer their own perception, reasoning, and control logic on top.
+
+Iris is a tool, not a brain.
+
+Core Responsibilities
+Iris focuses on four pillars:
+
+1. Deterministic Frame Capture
+4K@30/60fps USB UVC capture pipeline
+
+Zero-copy frame paths where possible
+
+Configurable pixel formats (BGRA, NV12, YUY2)
+
+Region-of-interest cropping and scaling
+
+Stable timestamps and sequence counters
+
+Multi-camera support (enumeration, hotplug detection)
+
+2. Telemetry-First Architecture
+Every subsystem emits structured telemetry events:
+
+capture_fps, dropped_frames, latency
+
+USB bandwidth utilization
+
+thermal and power draw (if available)
+
+camera state changes (connected, disconnected, error)
+
+configuration changes (resolution, format, exposure, gain)
+
+Telemetry is broadcast to RemoteDexter agents via:
+
+Named pipes (Windows)
+
+Unix sockets (Linux)
+
+Optional WebSocket bridge for remote agents
+
+3. Modular Control Surface
+Iris exposes a unified control API for:
+
+Resolution, FPS, pixel format
+
+Exposure, gain, white balance
+
+Focus (auto/manual), zoom, pan/tilt (if supported)
+
+HDR toggle, low-light compensation
+
+USB bandwidth negotiation
+
+All controls are capability‑queried at runtime and exposed through a typed Rust interface.
+
+4. Agent‑Ready Streaming Interfaces
+Iris provides multiple output modes:
+
+Pull mode — agents request frames on demand
+
+Push mode — Iris streams frames to subscribers
+
+Shared memory mode — zero-copy ring buffer for high‑FPS pipelines
+
+IPC mode — frames delivered as compressed MJPEG/H264 bursts for remote agents
+
+Agents can subscribe to:
+
+raw frames
+
+downscaled preview frames
+
+motion‑triggered deltas
+
+metadata-only streams
+
+System Architecture
+Iris is structured into clean, testable modules:
+
+Module A — Hardware Abstraction Layer
+USB UVC device enumeration
+
+Capability probing
+
+Cross-platform backend (Windows Media Foundation, Linux V4L2)
+
+Module B — Capture Pipeline
+Async frame acquisition
+
+FPS pacing
+
+Drop policy (newest/oldest)
+
+Region cropping + scaling
+
+Pixel format conversion (via SIMD or GPU path)
+
+Module C — Telemetry & Diagnostics
+Structured telemetry events
+
+Health monitoring (latency, bandwidth, thermal)
+
+Error reporting + recovery strategies
+
+Rolling statistics windows
+
+Note: `FrameCaptured.size_bytes` is provided by the capture backend and is authoritative
+— it represents the exact frame size in bytes after any cropping or format conversions.
+Consumers should treat it as a byte count.
+
+Module D — Control Interface
+Unified camera control API
+
+Capability discovery
+
+Runtime configuration updates
+
+Persistence of camera profiles
+
+Module E — IPC Bridge
+Command pipe for external agents
+
+Telemetry pipe for subscribers
+
+JSON envelope protocol (mirrors BSR style)
+
+Optional WebSocket bridge
+
+Module F — Agent Integration Layer
+High-level Rust API for RemoteDexter agents
+
+Frame subscription primitives
+
+Event hooks (on_connect, on_frame, on_error)
+
+Optional plugin system for preprocessing adapters
+
+Design Principles
+Iris follows the same engineering philosophy as Baxter’s Screen Record:
+
+Deterministic — predictable behavior under load
+
+Modular — each block is isolated and testable
+
+Telemetry-rich — everything observable, nothing hidden
+
+Zero magic — no inference, no heuristics, no “smart” behavior
+
+Agent-first — Iris is a substrate for smarter systems
+
+Cross-platform — Windows + Linux parity
+
+Crash-safe — robust recovery from USB disconnects, bandwidth drops, or driver resets
+
+Example Use Cases
+RemoteDexter agent performing OCR on live camera feed
+
+Robotics control loop needing low-latency 4K frames
+
+Security agent monitoring motion or light changes
+
+Vision-based automation tasks
+
+Multi-agent systems requiring synchronized visual context
+
+Deliverables
+Iris will ship as:
+
+A stand-alone Rust crate (iris-capture)
+
+A companion IPC service (iris-daemon)
+
+A telemetry spec compatible with RemoteDexter
+
+A full suite of acceptance tests mirroring the BSR block structure
+
+Optional GUI viewer for debugging (not required for agents)
+
+================================================================================
+NEXT STEPS — Direct Path to Fully Functional Real‑World App
+================================================================================
+Last updated: 2026‑03‑15
+
+Current state
+  Blocks A1–E1 and I1 complete. Mock backend functional end‑to‑end (capture →
+  IPC → telemetry → UI). All workspace tests pass. Headless demo runs and
+  produces correct FrameCaptured telemetry with authoritative size_bytes.
+  WMF backend in iris‑hal is a stub (returns NotImplemented).
+
+Goal
+  Ship a reliable app that talks to a real USB webcam, provides authoritative
+  telemetry, supports ROI/resolution changes, and runs stably in interactive
+  and headless modes.
+
+─── Phase 1: WMF Backend (highest priority) ───────────────────────────────────
+  File: crates/iris-hal/backend.rs (expand WmfBackend)
+  Dependency: windows crate v0.54 already in Cargo.toml with MF features.
+
+  1. Implement enumerate_devices()
+     - Initialize COM + MF, use MFEnumDeviceSources to list video capture devices.
+     - Return Vec<DeviceInfo> with real device name/vendor.
+     - Acceptance: ListDevices returns the plugged webcam by name.
+
+  2. Implement open_device() / close_device()
+     - Activate IMFMediaSource from the device, create IMFSourceReader.
+     - Store reader handle in WmfBackend state.
+     - Acceptance: open then close without panic or leak.
+
+  3. Implement probe_capabilities()
+     - Query the source reader for available media types (resolution, fps, format).
+     - Map MF subtypes to PixelFormat (NV12, YUY2, RGB24, BGR24).
+     - Return DeviceCapabilities with all supported FormatDescriptors.
+
+  4. Implement read_frame()
+     - Call ReadSample on the source reader (synchronous/blocking).
+     - Copy sample buffer into Vec<u8>, return it.
+     - Acceptance: frame data is non-empty and size == expected_size(w,h,fmt).
+
+  5. Implement list_controls() / get_control() / set_control()
+     - Use IAMCameraControl / IAMVideoProcAmp via the MF source.
+     - Map to brightness, contrast, exposure, gain etc.
+     - Acceptance: get/set round-trips correctly.
+
+─── Phase 2: Runtime Backend Selection ─────────────────────────────────────────
+  File: crates/iris-ui/bootstrap.rs
+
+  1. Read env IRIS_BACKEND (values: "mock" | "wmf", default "mock").
+  2. When "wmf": instantiate WmfBackend, use it for ListDevices and wire a
+     WMF-backed CaptureBackend into CaptureService.
+  3. When "mock": keep current MockUvcBackend + MockCaptureBackend path.
+  4. Also create a WmfCaptureBackend in crates/iris-capture/src/backend.rs
+     that wraps UvcBackend (open → read_frame loop → CaptureFrame).
+
+─── Phase 3: Hardware‑Gated Integration Tests ──────────────────────────────────
+  Files: crates/iris-hal/tests.rs, crates/iris-capture/src/tests.rs
+
+  1. Add tests gated on env IRIS_USE_HW=1 (skip otherwise).
+  2. Test: enumerate real devices, open, read N frames, assert data.len() > 0.
+  3. Test: frame.data.len() == CaptureFrame::expected_size(w,h,fmt).
+  4. Test: CaptureTelemetry.size_bytes == frame.data.len() after ROI.
+
+─── Phase 4: Headless + Interactive Smoke Tests ────────────────────────────────
+  Commands:
+    # Headless real-device run
+    $env:RUST_LOG="debug"
+    $env:IRIS_UI_HEADLESS="1"
+    $env:IRIS_BACKEND="wmf"
+    cargo run -p iris-ui > iris-ui-real-headless.log 2>&1
+
+    # Interactive run
+    $env:RUST_LOG="info"
+    $env:IRIS_BACKEND="wmf"
+    cargo run -p iris-ui
+
+  Verify:
+    - ListDevices shows real camera name.
+    - FrameCaptured events have size_bytes > 0 matching actual frame bytes.
+    - Start/stop capture works without panic.
+    - ROI toggle reduces size_bytes.
+    - Resolution change updates telemetry.
+
+─── Phase 5: Stability Tuning ──────────────────────────────────────────────────
+  File: crates/iris-capture/src/service.rs
+
+  1. If dropped frames > 1% over 30s, increase max_queue_depth.
+  2. If latency > 100ms, tune drop policy or add frame skipping.
+  3. Add dropped_frames counter to CaptureTelemetry for observability.
+
+─── Phase 6: Remaining Blocks (lower priority, not blocking real‑world test) ──
+  Block F1 — Control interface (camera controls UI surface)
+  Block G1 — Streaming interfaces (push/pull/shared-mem modes)
+  Block G2 — Compressed IPC (MJPEG/H264 burst delivery)
+  Block H1 — Iris debug UI (richer UI panels)
+  Block H2 — WebSocket bridge (remote agent access)
+  These can be implemented after the core capture path is verified with
+  real hardware.
+
+─── Acceptance Criteria (real‑world ready) ─────────────────────────────────────
+  [ ] Device enumerates reproducibly across multiple runs.
+  [ ] 30s headless run: >99% of frames have data.len() == size_bytes.
+  [ ] Interactive UI displays live frames from the real camera.
+  [ ] ROI works: toggling reduces size_bytes in telemetry.
+  [ ] No panics, no memory leaks, no driver lockups over 5-minute run.
+  [ ] All workspace tests pass (cargo test --workspace).
+
+─── Risks & Mitigations ───────────────────────────────────────────────────────
+  Risk: WMF COM API complexity.
+    Mitigation: Use synchronous ReadSample first; async later if needed.
+
+  Risk: Pixel format mismatch (camera sends NV12, app expects RGB24).
+    Mitigation: Detect format from MF media type, map to PixelFormat enum,
+    compute expected_size correctly per format. Add unit tests.
+
+  Risk: Driver/permissions issues on Windows.
+    Mitigation: Document troubleshooting in REAL_WORLD_TEST.md. Test with
+    camera privacy settings enabled.
+
+  Risk: Dropped frames under 4K@30fps load.
+    Mitigation: Tune queue depth and drop policy. Add telemetry counters.

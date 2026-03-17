@@ -1,0 +1,27 @@
+[package]
+name = "iris-hal"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+iris-core = { path = "../iris-core" }
+iris-ipc = { path = "../iris-ipc" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.54", features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_Devices_Usb",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_Foundation",
+    "Win32_Media",
+] }

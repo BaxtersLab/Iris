@@ -1,0 +1,25 @@
+[package]
+name = "iris-capture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt","macros","sync","time"] }
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+iris-hal = { path = "../iris-hal" }
+iris-core = { path = "../iris-core" }
+iris-ipc = { path = "../iris-ipc" }
+
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.54", features = [
+	"Win32_Graphics_Dxgi",
+	"Win32_Graphics_Dxgi_Common",
+	"Win32_Graphics_Direct3D",
+	"Win32_Graphics_Direct3D11",
+	"Win32_Foundation",
+] }
+windows-core = { version = "0.54" }
