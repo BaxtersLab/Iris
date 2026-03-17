@@ -22,6 +22,8 @@ pub struct IrisApp {
     capture_rx_deadline: Option<std::time::Instant>,
     // Track whether we've set the window size once on startup
     did_set_window_size: bool,
+    // Whether capture is currently active (used to highlight Start button)
+    is_capturing: bool,
 }
 
 impl IrisApp {
@@ -38,6 +40,7 @@ impl IrisApp {
             preview_texture: None,
             capture_rx_deadline: None,
             did_set_window_size: false,
+            is_capturing: false,
         };
 
         // fetch initial device list
@@ -85,6 +88,8 @@ impl eframe::App for IrisApp {
                             if let Ok(mut lf) = self.last_frame_info.lock() {
                                 *lf = Some((*width, *height));
                             }
+                            // presence of frame telemetry implies capture is active
+                            self.is_capturing = true;
                         }
                         new_entries.push(s);
                     }
@@ -121,12 +126,17 @@ impl eframe::App for IrisApp {
                     Err(_) => false,
                 };
 
+                let mut start_button = egui::Button::new("Start Capture");
+                if self.is_capturing {
+                    start_button = start_button.fill(Color32::from_rgb(76, 175, 80));
+                }
                 let start_resp = ui
-                    .add_enabled(has_device, egui::Button::new("Start Capture"))
+                    .add_enabled(has_device, start_button)
                     .on_hover_text(if has_device { "Start camera capture" } else { "Select a device first" });
                 ui.label("[1]");
                 if start_resp.clicked() {
                     start_resp.request_focus();
+                    self.is_capturing = true;
                     let ipc = Arc::clone(&self.ipc);
                     tokio::spawn(async move {
                         let _ = ipc.send_command(IpcCommand::StartCapture).await;
@@ -145,6 +155,7 @@ impl eframe::App for IrisApp {
                 ui.label("[2]");
                 if stop_resp.clicked() {
                     stop_resp.request_focus();
+                    self.is_capturing = false;
                     let ipc = Arc::clone(&self.ipc);
                     tokio::spawn(async move {
                         let _ = ipc.send_command(IpcCommand::StopCapture).await;
