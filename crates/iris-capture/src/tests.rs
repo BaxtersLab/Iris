@@ -356,3 +356,144 @@ mod tests {
         svc_task.await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod mjpeg_roi_tests {
+    use crate::backend::MockCaptureBackend;
+    use crate::frame::{CaptureFrame, Roi};
+    use crate::service::CaptureService;
+    use iris_hal::device::PixelFormat;
+
+    const TINY_JPEG: &[u8] = include_bytes!("../tests/fixtures/tiny16.jpg");
+
+    fn mjpeg_frame(data: Vec<u8>) -> CaptureFrame {
+        CaptureFrame {
+            sequence: 1,
+            width: 16,
+            height: 16,
+            format: PixelFormat::Mjpeg,
+            data,
+            timestamp_us: 0,
+            is_cropped: false,
+        }
+    }
+
+    /// ROI on MJPEG used to be a documented no-op (`is_cropped = false`).
+    /// It must now decode and genuinely crop, which necessarily converts the
+    /// frame to RGB24 — a compressed frame has no pixel grid to slice.
+    #[test]
+    fn roi_on_mjpeg_decodes_and_crops() {
+        let mut frame = mjpeg_frame(TINY_JPEG.to_vec());
+        CaptureService::<MockCaptureBackend>::apply_roi(
+            &mut frame,
+            Roi {
+                x: 2,
+                y: 2,
+                width: 8,
+                height: 8,
+            },
+        );
+
+        assert_eq!(
+            frame.format,
+            PixelFormat::Rgb24,
+            "cropping MJPEG must decode it; the frame is no longer compressed"
+        );
+        assert_eq!((frame.width, frame.height), (8, 8), "ROI geometry applied");
+        assert!(frame.is_cropped, "frame must report itself cropped");
+        assert_eq!(
+            frame.data.len(),
+            8 * 8 * 3,
+            "cropped RGB24 must be tightly packed"
+        );
+    }
+
+    /// A truncated or corrupt MJPEG frame must leave the frame completely
+    /// untouched and uncropped, never half-decoded and never byte-sliced as if
+    /// it were raw pixels.
+    #[test]
+    fn roi_on_corrupt_mjpeg_leaves_frame_untouched() {
+        // SOI with no EOI: truncated.
+        let corrupt = vec![0xFF, 0xD8, 0x11, 0x22, 0x33];
+        let mut frame = mjpeg_frame(corrupt.clone());
+        CaptureService::<MockCaptureBackend>::apply_roi(
+            &mut frame,
+            Roi {
+                x: 2,
+                y: 2,
+                width: 8,
+                height: 8,
+            },
+        );
+
+        assert_eq!(frame.format, PixelFormat::Mjpeg, "format must not change");
+        assert_eq!(frame.data, corrupt, "data must not be modified");
+        assert_eq!((frame.width, frame.height), (16, 16), "geometry unchanged");
+        assert!(!frame.is_cropped, "must report itself uncropped");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod mjpeg_hardware_tests {
+    /// End-to-end: pull a real frame off the camera through the V4L2 backend
+    /// and decode it. The fixture tests prove the decoder works on a 16x16
+    /// image; this proves it works on what the hardware actually emits —
+    /// 1080p MJPEG with the driver's padding byte still attached.
+    #[tokio::test]
+    async fn real_camera_mjpeg_frame_decodes() {
+        if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
+            eprintln!("skipping real_camera_mjpeg_frame_decodes (set IRIS_USE_HW=1)");
+            return;
+        }
+        use iris_hal::backend::UvcBackend as _;
+        use iris_hal::device::PixelFormat;
+        use iris_hal::v4l2_backend::v4l2::V4l2UvcBackend;
+
+        let backend = V4l2UvcBackend::new();
+        let devs = backend.enumerate_devices().await.expect("enumerate failed");
+        assert!(!devs.is_empty(), "no capture device present");
+        let id = devs[0].id.clone();
+
+        backend.open_device(&id).await.expect("open failed");
+        let fmt = backend
+            .current_format(&id)
+            .await
+            .expect("current_format failed")
+            .expect("open device must report a format");
+
+        if fmt.pixel_format != PixelFormat::Mjpeg {
+            eprintln!("camera is delivering {:?}, not MJPEG — skipping", fmt.pixel_format);
+            backend.close_device(&id).await.ok();
+            return;
+        }
+
+        let raw = backend.read_frame(&id).await.expect("read_frame failed");
+        backend.close_device(&id).await.expect("close failed");
+
+        let decoded = crate::mjpeg::decode_to_rgb24(&raw)
+            .unwrap_or_else(|e| panic!("real camera frame failed to decode: {e}"));
+
+        eprintln!(
+            "decoded real frame: {}x{} from {} compressed bytes -> {} RGB bytes",
+            decoded.width,
+            decoded.height,
+            raw.len(),
+            decoded.rgb24.len()
+        );
+
+        assert_eq!(
+            (decoded.width, decoded.height),
+            (fmt.width, fmt.height),
+            "decoded geometry must match what the driver reported"
+        );
+        assert_eq!(decoded.rgb24.len(), (fmt.width * fmt.height * 3) as usize);
+
+        // A real scene is never a single flat colour; this catches a decode
+        // that "succeeds" into an empty buffer.
+        let first = decoded.rgb24[0];
+        assert!(
+            decoded.rgb24.iter().any(|&b| b != first),
+            "decoded frame is a uniform buffer — not a real image"
+        );
+    }
+}

@@ -320,14 +320,40 @@ impl eframe::App for IrisApp {
                                     let h = frame.height as usize;
                                     let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 4);
                                     match frame.format {
-                                        // MJPEG is a compressed JPEG per frame; turning it
-                                        // into RGBA needs a JPEG decoder, which Iris does not
-                                        // depend on (dependency-light by design). Leave
-                                        // `pixels` empty — the `pixels.len() == w*h*4` guard
-                                        // below then skips the texture update, so the preview
-                                        // holds its previous frame instead of rendering
-                                        // garbage. See ROADMAP.md.
-                                        iris_hal::device::PixelFormat::Mjpeg => {}
+                                        // MJPEG is one compressed JPEG per frame. Decoding
+                                        // lives in `iris_capture::mjpeg` so the HAL keeps
+                                        // handing out the untouched compressed stream and
+                                        // only the preview pays the decode cost.
+                                        //
+                                        // On any failure `pixels` is left empty and the
+                                        // `pixels.len() == w*h*4` guard below skips the
+                                        // texture update, so the preview holds its previous
+                                        // frame rather than rendering garbage.
+                                        iris_hal::device::PixelFormat::Mjpeg => {
+                                            match iris_capture::mjpeg::decode_to_rgb24(&frame.data)
+                                            {
+                                                Ok(d)
+                                                    if d.width as usize == w
+                                                        && d.height as usize == h =>
+                                                {
+                                                    pixels =
+                                                        iris_capture::mjpeg::rgb24_to_rgba8(&d.rgb24);
+                                                }
+                                                // Decoded fine but disagrees with the
+                                                // telemetry geometry — trusting either one
+                                                // would index the buffer wrongly.
+                                                Ok(d) => {
+                                                    tracing::warn!(
+                                                        "MJPEG decoded {}x{} but frame reports {w}x{h}; skipping",
+                                                        d.width,
+                                                        d.height
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!("MJPEG decode failed: {e}");
+                                                }
+                                            }
+                                        }
                                         iris_hal::device::PixelFormat::Bgr24 => {
                                             let d = frame.data;
                                             for i in (0..d.len()).step_by(3) {

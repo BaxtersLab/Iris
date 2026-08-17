@@ -2,6 +2,7 @@ pub mod backend;
 #[cfg(windows)]
 pub mod dxgi_backend;
 pub mod frame;
+pub mod mjpeg;
 pub mod service;
 pub mod telemetry;
 

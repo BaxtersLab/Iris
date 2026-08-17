@@ -226,15 +226,32 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
 }
 
 impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
-    fn apply_roi(frame: &mut CaptureFrame, roi: Roi) {
+    pub(crate) fn apply_roi(frame: &mut CaptureFrame, roi: Roi) {
         match frame.format {
-            // MJPEG is a compressed stream — there is no pixel grid to slice, so
-            // ROI cannot be applied without a full JPEG decode. Leave the frame
-            // untouched and report it as uncropped rather than corrupting the
-            // JPEG by byte-slicing it as if it were raw pixels.
-            PixelFormat::Mjpeg => {
-                frame.is_cropped = false;
-            }
+            // MJPEG is compressed — there is no pixel grid to slice, so cropping
+            // requires a full decode. The frame consequently stops being
+            // compressed: it becomes RGB24 and is cropped as such, and `format`
+            // is updated so telemetry describes what the frame now actually is
+            // rather than what it arrived as.
+            //
+            // If the decode fails the frame is left untouched and reported
+            // uncropped, which is the old behaviour — never byte-sliced as if it
+            // were raw pixels, since that would corrupt the JPEG.
+            PixelFormat::Mjpeg => match crate::mjpeg::decode_to_rgb24(&frame.data) {
+                Ok(decoded) => {
+                    frame.data = decoded.rgb24;
+                    frame.width = decoded.width;
+                    frame.height = decoded.height;
+                    frame.format = PixelFormat::Rgb24;
+                    // It is a pixel grid now, so the RGB24 arm below applies.
+                    // Terminates: `format` is no longer Mjpeg.
+                    Self::apply_roi(frame, roi);
+                }
+                Err(e) => {
+                    tracing::warn!("MJPEG decode failed, ROI not applied: {e}");
+                    frame.is_cropped = false;
+                }
+            },
             PixelFormat::Rgb24 | PixelFormat::Bgr24 => {
                 let bpp = 3usize;
                 let src_w = frame.width as usize;
