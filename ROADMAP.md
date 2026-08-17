@@ -9,25 +9,48 @@ than left silently incomplete. Format:
 
 ## Linux (V4L2) — opened 2026-08-01 during the Ubuntu 26.04 intake
 
-- [ ] STUB: `iris-hal/v4l2_backend.rs` frame-read methods (5 sites returning `HalError::NotImplemented`)
-      — real V4L2 streaming capture (`VIDIOC_REQBUFS` / `VIDIOC_QBUF` / `VIDIOC_DQBUF` mmap loop,
-      mirroring the WMF `ReadSample` path) — deferred: the Linux backend was landed as
-      enumerate + probe only; the capture pipeline was never wired up. **This is the remaining
-      blocker for real-frame proof on Linux.** Enumeration and capability probing ARE implemented
-      and are verified against real hardware (see `handoffs.md`, 2026-08-01).
+- [x] **DONE 2026-08-17 (`23b15eb`)** — ~~STUB: `iris-hal/v4l2_backend.rs` frame-read methods~~.
+      Full streaming capture: REQBUFS / QUERYBUF + mmap / QBUF / DQBUF / STREAMON, plus
+      G_CTRL / S_CTRL / QUERYCTRL and `current_format`. `grep -c NotImplemented` on that file
+      is now 0. Verified on real hardware at 1920x1080 @30fps MJPEG, 6/6 consecutive runs.
+      Two findings worth keeping: buffers flagged `V4L2_BUF_FLAG_ERROR` must be discarded and
+      retried, because the first frame after STREAMON is often a torn JPEG (valid SOI,
+      plausible length, truncated payload); and for the ABI structs **field offsets are the
+      invariant, not sizes** — declaring `m_offset` as `u32` keeps `v4l2_buffer` at 88 bytes
+      while shifting every later field by 4, so a size assertion stays green.
 
-- [ ] STUB: MJPEG preview decode — `iris-ui/ui_app.rs` frame→RGBA conversion has an empty
-      `PixelFormat::Mjpeg` arm — a JPEG decoder (e.g. `zune-jpeg`, or `image` with only the jpeg
-      feature) feeding the existing RGBA path — deferred: Iris is deliberately dependency-light
-      (the V4L2 backend uses raw ioctls via libc, no bindgen), so adding a decode dependency is a
-      design decision for the operator, not an incidental fix. Current behaviour is safe: `pixels`
-      is left empty, the `pixels.len() == w*h*4` guard skips the texture update, and the preview
-      holds its previous frame rather than rendering garbage.
+- [x] **DONE 2026-08-17 (`c8b6f85`)** — ~~STUB: MJPEG preview decode~~. `zune-jpeg` was chosen
+      (as this entry suggested); pure Rust, no bindgen, no system libs, so the dependency-light
+      rule holds. Decode lives in `iris_capture::mjpeg`, **not** the HAL, so `read_frame` keeps
+      returning the untouched compressed stream for recording and IPC and only the pixel
+      consumers pay the cost. The safe-fallback behaviour described below is retained for decode
+      failures and geometry mismatches.
 
-- [ ] STUB: MJPEG ROI cropping — `iris-capture/src/service.rs` `apply_roi` `PixelFormat::Mjpeg` arm
-      is a no-op setting `is_cropped = false` — crop-after-decode once the decoder above exists —
-      deferred: MJPEG is a compressed stream with no pixel grid, so byte-slicing it would corrupt
-      the JPEG. Refusing to crop is the correct behaviour until a decode step exists.
+- [x] **DONE 2026-08-17 (`c8b6f85`)** — ~~STUB: MJPEG ROI cropping~~. `apply_roi` decodes, crops
+      via the existing RGB24 path, and sets `format = Rgb24` — the frame genuinely stops being
+      compressed, so telemetry says so. On decode failure it falls back to the old behaviour:
+      untouched and uncropped, never byte-sliced. `apply_roi` is now `pub(crate)` and has tests;
+      it had none before.
+      **Caveat carried forward:** `zune-jpeg` reports *success* on a truncated JPEG, returning a
+      partially-filled frame. `decode_to_rgb24` therefore requires an EOI marker before decoding.
+      Anything else in the estate decoding hardware-sourced JPEG needs its own completeness check.
+
+## Windows (WMF) — duplicate backend, opened 2026-08-17
+
+- [ ] STUB: `iris-hal/wmf_backend.rs` — `WmfUvcBackend` has the same **5 `NotImplemented`**
+      methods (`open_device`, `close_device`, `read_frame`, `get_control`, `set_control`) that
+      `v4l2_backend.rs` had until `23b15eb`. **This was not previously declared here**, which
+      Article VII §2–3 requires.
+      **It is not a live capture bug.** There are two WMF implementations and both are in use:
+      `iris_hal::backend::WmfBackend` is fully implemented and is what `bootstrap.rs:276` uses
+      for actual capture; `wmf_backend.rs`'s `WmfUvcBackend` is the enumeration-only mirror of
+      the old V4L2 backend and `bootstrap.rs:74` calls only its `enumerate_sync`. So Windows
+      capture works — but the stubs are `pub` and reachable, and the duplication is a trap for
+      anyone who picks the wrong one.
+      **Resolution is a design decision, not an incidental fix:** either delete
+      `wmf_backend.rs` and route enumeration through `backend::WmfBackend`, or implement its
+      five methods by delegating to the real one. Needs a Windows box to verify either way —
+      this box cannot build or test the WMF path at all.
 
 ## GUI memory leak — FOUND AND FIXED (2026-08-01, Linux workstation)
 
@@ -99,6 +122,8 @@ nearly every mode above ~640x480 is MJPEG-only, because uncompressed 1080p excee
 bandwidth — so a 1080p-capable camera enumerated as **640x480-only** on Linux while reporting its
 full 9 modes on Windows (Media Foundation decodes MJPEG transparently and reports NV12).
 
-Enumerating the modes is therefore correct and necessary, but **selecting** an MJPEG mode is not yet
-useful end-to-end until the two decode stubs above are filled. Callers should check
-`PixelFormat::is_raw()` before treating frame data as a pixel grid.
+Enumerating the modes is therefore correct and necessary. **As of 2026-08-17 (`c8b6f85`) both
+decode stubs are filled, so selecting an MJPEG mode is now useful end to end** — verified against
+real hardware at 1920x1080. Callers should still check `PixelFormat::is_raw()` before treating
+frame data as a pixel grid: `read_frame` deliberately returns the compressed bytes untouched, and
+decoding is an explicit step via `iris_capture::mjpeg::decode_to_rgb24`.
