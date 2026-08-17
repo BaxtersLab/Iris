@@ -1,4 +1,4 @@
-use eframe::egui::{self, CentralPanel, ScrollArea, TopBottomPanel};
+﻿use eframe::egui::{self, CentralPanel, ScrollArea, TopBottomPanel};
 use eframe::egui::{ColorImage, TextureHandle, Key, Color32, Stroke, Rounding};
 use iris_capture::frame::CaptureFrame;
 use iris_capture::service::CaptureHandle;
@@ -174,7 +174,7 @@ impl eframe::App for IrisApp {
                 // Visual focus outline if widget has keyboard focus
                 if start_resp.has_focus() {
                     let rect = start_resp.rect;
-                    let stroke = Stroke::new(1.0, Color32::BLACK);
+                    let stroke = Stroke::new(1.0_f32, Color32::BLACK);
                     ui.painter().rect_stroke(rect, Rounding::same(4.0), stroke);
                 }
 
@@ -192,7 +192,7 @@ impl eframe::App for IrisApp {
                 }
                 if stop_resp.has_focus() {
                     let rect = stop_resp.rect;
-                    let stroke = Stroke::new(1.0, Color32::BLACK);
+                    let stroke = Stroke::new(1.0_f32, Color32::BLACK);
                     ui.painter().rect_stroke(rect, Rounding::same(4.0), stroke);
                 }
             });
@@ -245,7 +245,7 @@ impl eframe::App for IrisApp {
                     }
                     if scan_resp.has_focus() {
                         let rect = scan_resp.rect;
-                        let stroke = Stroke::new(1.0, Color32::BLACK);
+                        let stroke = Stroke::new(1.0_f32, Color32::BLACK);
                         ui.painter().rect_stroke(rect, Rounding::same(4.0), stroke);
                     }
 
@@ -320,7 +320,15 @@ impl eframe::App for IrisApp {
                                     let h = frame.height as usize;
                                     let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 4);
                                     match frame.format {
-                                        iris_core::PixelFormat::Bgr24 => {
+                                        // MJPEG is a compressed JPEG per frame; turning it
+                                        // into RGBA needs a JPEG decoder, which Iris does not
+                                        // depend on (dependency-light by design). Leave
+                                        // `pixels` empty — the `pixels.len() == w*h*4` guard
+                                        // below then skips the texture update, so the preview
+                                        // holds its previous frame instead of rendering
+                                        // garbage. See ROADMAP.md.
+                                        iris_hal::device::PixelFormat::Mjpeg => {}
+                                        iris_hal::device::PixelFormat::Bgr24 => {
                                             let d = frame.data;
                                             for i in (0..d.len()).step_by(3) {
                                                 let b = d[i];
@@ -332,7 +340,7 @@ impl eframe::App for IrisApp {
                                                 pixels.push(255);
                                             }
                                         }
-                                        iris_core::PixelFormat::Rgb24 => {
+                                        iris_hal::device::PixelFormat::Rgb24 => {
                                             let d = frame.data;
                                             for i in (0..d.len()).step_by(3) {
                                                 let r = d[i];
@@ -344,8 +352,62 @@ impl eframe::App for IrisApp {
                                                 pixels.push(255);
                                             }
                                         }
-                                        // Other formats not explicitly handled fall through
-                                        _ => {}
+                                        iris_hal::device::PixelFormat::Nv12 => {
+                                            // NV12: Y plane (w*h) then interleaved
+                                            // UV at half resolution. BT.601.
+                                            let d = &frame.data;
+                                            if d.len() >= w * h * 3 / 2 {
+                                                let uv_base = w * h;
+                                                for y in 0..h {
+                                                    for x in 0..w {
+                                                        let yv = d[y * w + x] as f32;
+                                                        let uvi = uv_base
+                                                            + (y / 2) * w
+                                                            + (x / 2) * 2;
+                                                        let u = d[uvi] as f32 - 128.0;
+                                                        let v = d[uvi + 1] as f32 - 128.0;
+                                                        let c = yv - 16.0;
+                                                        let r = (1.164 * c + 1.596 * v)
+                                                            .clamp(0.0, 255.0);
+                                                        let g = (1.164 * c - 0.392 * u
+                                                            - 0.813 * v)
+                                                            .clamp(0.0, 255.0);
+                                                        let b = (1.164 * c + 2.017 * u)
+                                                            .clamp(0.0, 255.0);
+                                                        pixels.push(r as u8);
+                                                        pixels.push(g as u8);
+                                                        pixels.push(b as u8);
+                                                        pixels.push(255);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        iris_hal::device::PixelFormat::Yuyv => {
+                                            // YUYV 4:2:2: Y0 U Y1 V per 2 pixels.
+                                            let d = &frame.data;
+                                            if d.len() >= w * h * 2 {
+                                                for i in (0..w * h * 2).step_by(4) {
+                                                    let y0 = d[i] as f32;
+                                                    let u = d[i + 1] as f32 - 128.0;
+                                                    let y1 = d[i + 2] as f32;
+                                                    let v = d[i + 3] as f32 - 128.0;
+                                                    for yv in [y0, y1] {
+                                                        let c = yv - 16.0;
+                                                        let r = (1.164 * c + 1.596 * v)
+                                                            .clamp(0.0, 255.0);
+                                                        let g = (1.164 * c - 0.392 * u
+                                                            - 0.813 * v)
+                                                            .clamp(0.0, 255.0);
+                                                        let b = (1.164 * c + 2.017 * u)
+                                                            .clamp(0.0, 255.0);
+                                                        pixels.push(r as u8);
+                                                        pixels.push(g as u8);
+                                                        pixels.push(b as u8);
+                                                        pixels.push(255);
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
 
                                     if pixels.len() == w * h * 4 {
@@ -353,13 +415,30 @@ impl eframe::App for IrisApp {
                                             [frame.width as usize, frame.height as usize],
                                             &pixels,
                                         );
-                                        // create or replace texture
-                                        let tex = ctx.load_texture(
-                                            "iris_preview",
-                                            image,
-                                            egui::TextureOptions::LINEAR,
-                                        );
-                                        self.preview_texture = Some(tex);
+                                        // Replace the EXISTING texture's contents in place.
+                                        //
+                                        // This used to call `ctx.load_texture(...)` every frame,
+                                        // which ALLOCATES A NEW TEXTURE each time — it does not
+                                        // replace, despite the old comment saying so. Overwriting
+                                        // `self.preview_texture` did not free the previous one, so
+                                        // the app leaked one full RGBA image (width*height*4) per
+                                        // captured frame: ~27 MB/s at 30 fps, 788 MB -> 4.8 GB in
+                                        // under a minute. Confirmed with heaptrack: 584.91 MB
+                                        // leaked over 476 calls from this exact line, = 1.23 MB
+                                        // each = 640*480*4 exactly. `TextureHandle::set` reuses
+                                        // the allocation instead.
+                                        match &mut self.preview_texture {
+                                            Some(tex) => {
+                                                tex.set(image, egui::TextureOptions::LINEAR);
+                                            }
+                                            None => {
+                                                self.preview_texture = Some(ctx.load_texture(
+                                                    "iris_preview",
+                                                    image,
+                                                    egui::TextureOptions::LINEAR,
+                                                ));
+                                            }
+                                        }
                                         if let Ok(mut lf) = self.last_frame_info.lock() {
                                             *lf = Some((frame.width, frame.height));
                                         }

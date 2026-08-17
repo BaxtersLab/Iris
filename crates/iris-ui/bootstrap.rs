@@ -87,7 +87,28 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                             }
                         }
                     };
-                    #[cfg(not(windows))]
+                    // On Linux, try V4L2 enumeration first for real USB cameras;
+                    // fall back to the mock backend if V4L2 errors or finds nothing.
+                    #[cfg(target_os = "linux")]
+                    let raw_list = {
+                        let v4l2_result =
+                            iris_hal::v4l2_backend::v4l2::V4l2UvcBackend::enumerate_sync();
+                        match v4l2_result {
+                            Ok(list) if !list.is_empty() => {
+                                println!("ListDevices: V4L2 found {} device(s)", list.len());
+                                list
+                            }
+                            Ok(_) => {
+                                println!("ListDevices: V4L2 returned 0 devices, falling back to mock");
+                                MockUvcBackend::new().enumerate_devices().await.unwrap_or_default()
+                            }
+                            Err(e) => {
+                                println!("ListDevices: V4L2 error ({:?}), falling back to mock", e);
+                                MockUvcBackend::new().enumerate_devices().await.unwrap_or_default()
+                            }
+                        }
+                    };
+                    #[cfg(not(any(windows, target_os = "linux")))]
                     let raw_list = MockUvcBackend::new().enumerate_devices().await.unwrap_or_default();
 
                     let devices = raw_list
@@ -227,6 +248,8 @@ impl IrisRuntime {
             .to_lowercase();
 
         // Box up a dynamic backend so `CaptureService` can be instantiated at runtime.
+        // IRIS_BACKEND: "mock" (default) | "dxgi" (Windows screen) | "wmf"
+        // (Windows camera) | "v4l2" (Linux camera).
         let boxed_backend: Box<dyn iris_capture::backend::CaptureBackend + Send + Sync> =
             if backend_name == "dxgi" {
                 #[cfg(windows)]
@@ -239,19 +262,76 @@ impl IrisRuntime {
                         capture_cfg.clone(),
                     ))
                 }
+            } else if backend_name == "wmf" {
+                #[cfg(windows)]
+                {
+                    // Initialize COM/MF on a dedicated keeper thread (parked for
+                    // the process lifetime) so the MAIN thread stays free for
+                    // winit's STA OleInitialize — MTA on main panics the window
+                    // with RPC_E_CHANGED_MODE.
+                    let (wmf_tx, wmf_rx) = std::sync::mpsc::channel();
+                    let _ = std::thread::Builder::new()
+                        .name("wmf-com-keeper".into())
+                        .spawn(move || {
+                            let created = iris_hal::backend::new_wmf_backend();
+                            let keep_alive = created.is_ok();
+                            let _ = wmf_tx.send(created);
+                            if keep_alive {
+                                loop {
+                                    std::thread::park();
+                                }
+                            }
+                        });
+                    match wmf_rx.recv() {
+                        Ok(Ok(wmf)) => Box::new(iris_capture::backend::UvcCaptureBackend::new(
+                            wmf,
+                            capture_cfg.clone(),
+                        )),
+                        other => {
+                            let why = match other {
+                                Ok(Err(e)) => format!("{e:?}"),
+                                Err(e) => format!("channel: {e:?}"),
+                                Ok(Ok(_)) => unreachable!(),
+                            };
+                            println!("IRIS_BACKEND=wmf init failed ({why}); falling back to mock");
+                            Box::new(iris_capture::backend::MockCaptureBackend::new(
+                                capture_cfg.clone(),
+                            ))
+                        }
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    println!("IRIS_BACKEND=wmf is Windows-only; falling back to mock");
+                    Box::new(iris_capture::backend::MockCaptureBackend::new(
+                        capture_cfg.clone(),
+                    ))
+                }
+            } else if backend_name == "v4l2" {
+                #[cfg(target_os = "linux")]
+                {
+                    Box::new(iris_capture::backend::UvcCaptureBackend::new(
+                        iris_hal::v4l2_backend::v4l2::V4l2UvcBackend::new(),
+                        capture_cfg.clone(),
+                    ))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    println!("IRIS_BACKEND=v4l2 is Linux-only; falling back to mock");
+                    Box::new(iris_capture::backend::MockCaptureBackend::new(
+                        capture_cfg.clone(),
+                    ))
+                }
             } else {
                 Box::new(iris_capture::backend::MockCaptureBackend::new(
                     capture_cfg.clone(),
                 ))
             };
 
-        // Create an external frame sender for possible consumers (encoder, tests).
-        let (frame_tx, _frame_rx) = tokio::sync::mpsc::channel(capture_cfg.max_queue_depth);
         let (capture_service, capture_handle) = CaptureService::new(
             boxed_backend,
             capture_cfg.clone(),
             capture_telemetry_tx.clone(),
-            frame_tx,
         );
 
         // create the capture command channel that will be used by the dispatcher
@@ -380,8 +460,10 @@ impl IrisRuntime {
                         continue;
                     }
                     Err(e) => {
-                        println!("Forwarder: recv error: {:?}", e);
-                        continue;
+                        // Closed = capture service is gone; exit instead of
+                        // busy-spinning on a dead channel.
+                        println!("Forwarder: recv error: {:?}; exiting", e);
+                        break;
                     }
                 }
             }

@@ -1,9 +1,11 @@
-use iris_capture::backend::{CaptureBackend, CaptureConfig};
-use iris_capture::DxgiCaptureBackend;
-use iris_core::error::IrisResult;
+//! DXGI screen-capture smoke (Windows-only; on other platforms prints a note).
 
+#[cfg(windows)]
 #[tokio::main]
-async fn main() -> IrisResult<()> {
+async fn main() -> iris_core::error::IrisResult<()> {
+    use iris_capture::backend::{CaptureBackend, CaptureConfig};
+    use iris_capture::DxgiCaptureBackend;
+
     let cfg = CaptureConfig {
         width: 1920,
         height: 1080,
@@ -30,4 +32,9 @@ async fn main() -> IrisResult<()> {
     backend.stop().await?;
     println!("Dxgi test finished.");
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("dxgi_test is Windows-only (DXGI desktop duplication).");
 }

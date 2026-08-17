@@ -30,6 +30,26 @@ pub enum PixelFormat {
     Bgr24,
     Nv12,
     Yuyv,
+    /// Motion-JPEG — a **compressed** stream, one JPEG image per frame.
+    ///
+    /// Unlike every other variant this is not raw pixel data, so it cannot be
+    /// cropped, strided or indexed without being decoded first. Callers must
+    /// treat it as an opaque byte blob.
+    ///
+    /// It is enumerated because on USB 2.0 UVC cameras nearly every mode above
+    /// ~640x480 is MJPEG-only (uncompressed 1080p exceeds USB 2.0 bandwidth);
+    /// skipping it makes such cameras appear far more limited than they are.
+    /// Windows Media Foundation decodes MJPEG transparently and reports NV12,
+    /// so this variant is only ever produced by the Linux V4L2 path.
+    Mjpeg,
+}
+
+impl PixelFormat {
+    /// True when the variant is raw pixel data that can be cropped/indexed
+    /// directly. False for compressed streams, which must be decoded first.
+    pub fn is_raw(&self) -> bool {
+        !matches!(self, PixelFormat::Mjpeg)
+    }
 }
 
 impl fmt::Display for PixelFormat {
@@ -39,6 +59,7 @@ impl fmt::Display for PixelFormat {
             PixelFormat::Bgr24 => write!(f, "BGR24"),
             PixelFormat::Nv12 => write!(f, "NV12"),
             PixelFormat::Yuyv => write!(f, "YUYV"),
+            PixelFormat::Mjpeg => write!(f, "MJPEG"),
         }
     }
 }

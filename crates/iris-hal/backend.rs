@@ -16,6 +16,11 @@ pub trait UvcBackend: Send + Sync + 'static {
     async fn list_controls(&self, id: &DeviceId) -> HalResult<Vec<ControlCapabilityInfo>>;
     async fn get_control(&self, id: &DeviceId, control_id: u32) -> HalResult<i64>;
     async fn set_control(&self, id: &DeviceId, control_id: u32, value: i64) -> HalResult<()>;
+    /// The format the opened device is actually delivering (authoritative for
+    /// telemetry). Default: unknown.
+    async fn current_format(&self, _id: &DeviceId) -> HalResult<Option<crate::device::FormatDescriptor>> {
+        Ok(None)
+    }
 }
 
 #[derive(Clone)]
@@ -474,23 +479,44 @@ mod wmf {
             }
 
             let closure = AssertSend(move || unsafe {
-                let mut flags = 0u32;
-                let mut timestamp = 0i64;
-                let mut stream_idx = 0u32;
-                let mut sample: Option<IMFSample> = None;
-                reader
-                    .0
-                    .ReadSample(
-                        MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                        0,
-                        Some(&mut stream_idx),
-                        Some(&mut flags),
-                        Some(&mut timestamp),
-                        Some(&mut sample),
-                    )
-                    .map_err(|e| HalError::Io(format!("ReadSample: {e}")))?;
+                // MF_SOURCE_READER_FLAG bits
+                const READERF_ERROR: u32 = 0x1;
+                const READERF_ENDOFSTREAM: u32 = 0x2;
 
-                let sample = sample.ok_or(HalError::Io("ReadSample returned no sample".into()))?;
+                // ReadSample may legitimately return no sample (stream ticks,
+                // format-change notifications, device warm-up before the first
+                // frame). Retry until a real sample arrives.
+                let mut got: Option<IMFSample> = None;
+                for _attempt in 0..50 {
+                    let mut flags = 0u32;
+                    let mut timestamp = 0i64;
+                    let mut stream_idx = 0u32;
+                    let mut sample: Option<IMFSample> = None;
+                    reader
+                        .0
+                        .ReadSample(
+                            MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                            0,
+                            Some(&mut stream_idx),
+                            Some(&mut flags),
+                            Some(&mut timestamp),
+                            Some(&mut sample),
+                        )
+                        .map_err(|e| HalError::Io(format!("ReadSample: {e}")))?;
+
+                    if flags & READERF_ERROR != 0 {
+                        return Err(HalError::Io("ReadSample: stream error".into()));
+                    }
+                    if flags & READERF_ENDOFSTREAM != 0 {
+                        return Err(HalError::Io("ReadSample: end of stream".into()));
+                    }
+                    if let Some(s) = sample {
+                        got = Some(s);
+                        break;
+                    }
+                }
+                let sample =
+                    got.ok_or(HalError::Io("ReadSample: no sample after 50 reads".into()))?;
 
                 let buffer: IMFMediaBuffer = sample
                     .ConvertToContiguousBuffer()
@@ -519,6 +545,22 @@ mod wmf {
 
         async fn list_controls(&self, _id: &DeviceId) -> HalResult<Vec<ControlCapabilityInfo>> {
             Ok(vec![])
+        }
+
+        async fn current_format(
+            &self,
+            id: &DeviceId,
+        ) -> HalResult<Option<crate::device::FormatDescriptor>> {
+            let st = self.state.lock().unwrap();
+            if st.device_id.as_deref() != Some(&id.0) {
+                return Ok(None);
+            }
+            Ok(Some(FormatDescriptor {
+                width: st.current_width,
+                height: st.current_height,
+                fps: 30,
+                pixel_format: st.current_format.clone(),
+            }))
         }
 
         async fn get_control(&self, _id: &DeviceId, _control_id: u32) -> HalResult<i64> {

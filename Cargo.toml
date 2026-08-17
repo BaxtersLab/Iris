@@ -5,10 +5,10 @@ members = [
     "crates/iris-ipc",
     "crates/iris-hrt",
     "crates/iris-hal",
-    "crates/iris-capture",
     "crates/iris-control",
     "crates/iris-stream",
     "crates/iris-ui",
+    "crates/iris-harness",
 ]
 
 [profile.release]

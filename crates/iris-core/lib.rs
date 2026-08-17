@@ -5,12 +5,12 @@ pub mod app;
 pub mod config;
 pub mod error;
 pub mod logging;
+pub mod pipeline;
 
 #[cfg(test)]
 mod tests {
     use super::app::{AppState, CaptureState};
     use super::config::IrisConfig;
-    use serde::{Deserialize, Serialize};
     use toml;
 
     #[test]

@@ -534,7 +534,7 @@ NOTES FOR BUILDER AGENT
 VERIFICATION COMMANDS
 ================================================================================
 
-    cd 'C:\Users\Baxter\Desktop\Baxters Screen Record\Baxters Screen Record'
+    cd '<screen-recorder-project-root>'
     $env:VCPKG_ROOT = "C:\tools\vcpkg"
     $env:LIBCLANG_PATH = "C:\tools\LLVM\bin"
 

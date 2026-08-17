@@ -1,6 +1,10 @@
 # HANDOFF — Phase 1: DXGI Capture Backend
 Date: 2026-03-16
 
+> **Redaction note (2026-08-16).** Local filesystem paths and references to a
+> separate internal project were replaced with placeholders when this repository
+> was made public. No technical content was changed.
+
 Summary
 - Phase: 1 (DXGI desktop duplication capture) — COMPLETE.
 - Owner: Baxter (local workspace). Implementation added to `crates/iris-capture` and exercised in `iris-ui` headless.
@@ -10,13 +14,15 @@ What was delivered
 - `crates/iris-capture/examples/dxgi_test.rs` — small example to run a hardware capture smoke test.
 - `crates/iris-ui/bootstrap.rs` — temporary wiring used to exercise DXGI in headless runs (can be reverted to runtime selection).
 - Tests: `cargo test --workspace` ran and passed on this machine.
-- Logs: headless run output saved to `C:\Users\Baxter\Desktop\Iris\iris-ui-headless.log`.
+- Logs: headless run output saved to `<workspace-root>\iris-ui-headless.log`.
 
 Key files & locations
 - Implementation: `crates/iris-capture/src/dxgi_backend.rs`
 - Example test: `crates/iris-capture/examples/dxgi_test.rs`
 - Headless UI logs: `iris-ui-headless.log` (workspace root)
-- Phase instruction blocks and ready-to-copy BSR artifact: `Baxters Screen Record/bsr module blocks/crates_bsr-capture_dxgi_backend.rs`
+- Phase instruction blocks: `Iris instruction blocks/` (this folder). The DXGI
+  backend was adapted from a screen-recorder project maintained separately and
+  not distributed with Iris.
 
 How to reproduce (local Windows machine)
 1. Ensure native toolchain and env:
@@ -47,8 +53,11 @@ Next recommended steps
 3. Phase 2: integrate frame conversion, buffering, and pipeline (pipeline wiring). Run integration tests and end-to-end validation.
 
 Contact & provenance
-- All edits are in-place in the local `Iris` workspace. No remote repo used.
-- For copies of original BSR artifacts, see `Baxters Screen Record/bsr module blocks`.
+- At the time of writing, all edits were in-place in a local `Iris` workspace
+  with no remote configured. The project has since been published to a git
+  remote; this line is retained as part of the original dated record.
+- The originating screen-recorder artifacts are maintained separately and are
+  not distributed with Iris.
 
 Appendix — quick diff notes
 - Added `tracing` dependency and `windows-core` tweaks in `crates/iris-capture/Cargo.toml` during iteration.

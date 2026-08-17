@@ -16,6 +16,23 @@ mod tests {
         );
     }
 
+    /// MJPEG frames are compressed, so size cannot be derived from dimensions.
+    /// `expected_size` returns 0 meaning "not predictable" — pin that contract
+    /// so nobody starts treating it as a real byte count or an empty frame.
+    #[test]
+    fn expected_size_is_zero_for_compressed_mjpeg() {
+        assert_eq!(CaptureFrame::expected_size(1920, 1080, PixelFormat::Mjpeg), 0);
+        // ...while every raw format still reports its true size.
+        assert_eq!(
+            CaptureFrame::expected_size(1920, 1080, PixelFormat::Nv12),
+            1920 * 1080 * 3 / 2
+        );
+        assert_eq!(
+            CaptureFrame::expected_size(1920, 1080, PixelFormat::Yuyv),
+            1920 * 1080 * 2
+        );
+    }
+
     #[test]
     fn test_roi_validation_valid() {
         let r = Roi {

@@ -18,12 +18,19 @@ impl CaptureFrame {
         self.data.len()
     }
 
+    /// Bytes a raw frame of `format` occupies at `width` x `height`.
+    ///
+    /// Returns **0 for [`PixelFormat::Mjpeg`]**: MJPEG is compressed, so frame
+    /// size varies per frame and cannot be derived from the dimensions. 0 here
+    /// means "not predictable", NOT "empty" — never use this value to validate
+    /// or reject an MJPEG buffer.
     pub fn expected_size(width: u32, height: u32, format: PixelFormat) -> usize {
         let pixels = (width * height) as usize;
         match format {
             PixelFormat::Rgb24 | PixelFormat::Bgr24 => pixels * 3,
             PixelFormat::Nv12 => pixels * 3 / 2,
             PixelFormat::Yuyv => pixels * 2,
+            PixelFormat::Mjpeg => 0,
         }
     }
 

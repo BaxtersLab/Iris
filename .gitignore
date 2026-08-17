@@ -6,3 +6,7 @@ Cargo.lock
 backup/
 dist/
 installer/
+
+# headless run artifacts
+iris-ui-headless*
+harness-output/

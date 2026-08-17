@@ -3,6 +3,8 @@ name = "iris-ui"
 version = "0.1.1"
 edition = "2021"
 
+# The Iris library (bootstrap runtime, ui_app, win32 helpers) lives at the
+# crate root; the camera app is the `iris-ui` bin.
 [lib]
 path = "lib.rs"
 
@@ -31,8 +33,6 @@ global-hotkey = "0.4"
 tracing-subscriber = "0.3"
 reqwest = { version = "0.11", features = ["blocking", "rustls-tls"] }
 hyper = { version = "0.14", features = ["full"] }
-windows-sys = { version = "0.48", optional = true }
-widestring = { version = "0.5", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = "0.48"

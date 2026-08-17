@@ -69,6 +69,11 @@ pub enum IpcCommand {
         section: String,
         json: String,
     },
+
+    /// Diagnostics: trigger an in-process rebase increment (tests/metrics).
+    ForceRebase,
+    /// Bring the Iris window to the foreground (no-op where unsupported).
+    ShowUi,
 }
 
 #[cfg(test)]

@@ -121,3 +121,112 @@ impl<T: CaptureBackend + ?Sized + Send + Sync> CaptureBackend for Box<T> {
         (**self).is_capturing()
     }
 }
+
+/// Adapter: drive any `iris_hal::backend::UvcBackend` (WMF on Windows, V4L2 on
+/// Linux) as a `CaptureBackend` — the "open → read_frame loop → CaptureFrame"
+/// bridge from the Phase-2 plan.
+///
+/// Device selection: `IRIS_DEVICE` env (exact id or substring match) or the
+/// first enumerated device. Pacing comes from the camera itself (a UVC
+/// `read_frame` blocks until the next frame), so no artificial sleep.
+/// `CaptureFrame.data.len()` is authoritative for size_bytes; width/height
+/// reflect the configured request (the camera's current mode may differ until
+/// format negotiation lands in a later block).
+pub struct UvcCaptureBackend<U: iris_hal::backend::UvcBackend> {
+    uvc: U,
+    device: Option<iris_hal::device::DeviceId>,
+    capturing: bool,
+    sequence: u64,
+    pub config: CaptureConfig,
+}
+
+impl<U: iris_hal::backend::UvcBackend> UvcCaptureBackend<U> {
+    pub fn new(uvc: U, config: CaptureConfig) -> Self {
+        UvcCaptureBackend {
+            uvc,
+            device: None,
+            capturing: false,
+            sequence: 0,
+            config,
+        }
+    }
+
+    fn map_err(e: iris_hal::error::HalError) -> iris_core::error::IrisError {
+        iris_core::error::IrisError::Capture(format!("uvc: {e}"))
+    }
+}
+
+#[async_trait]
+impl<U: iris_hal::backend::UvcBackend> CaptureBackend for UvcCaptureBackend<U> {
+    async fn start(&mut self) -> IrisResult<()> {
+        let devices = self.uvc.enumerate_devices().await.map_err(Self::map_err)?;
+        if devices.is_empty() {
+            return Err(iris_core::error::IrisError::Capture(
+                "no video capture devices found".into(),
+            ));
+        }
+        let wanted = std::env::var("IRIS_DEVICE").unwrap_or_default();
+        let chosen = if wanted.is_empty() {
+            devices[0].clone()
+        } else {
+            devices
+                .iter()
+                .find(|d| d.id.0 == wanted || d.id.0.contains(&wanted) || d.name.contains(&wanted))
+                .cloned()
+                .unwrap_or_else(|| devices[0].clone())
+        };
+        tracing::info!("UvcCaptureBackend: opening {} ({})", chosen.name, chosen.id);
+        self.uvc.open_device(&chosen.id).await.map_err(Self::map_err)?;
+        // Adopt the format the device is ACTUALLY delivering so telemetry
+        // (width/height/format) is authoritative, not the configured request.
+        if let Ok(Some(actual)) = self.uvc.current_format(&chosen.id).await {
+            if actual.width > 0 && actual.height > 0 {
+                tracing::info!(
+                    "UvcCaptureBackend: device mode {}x{} {}",
+                    actual.width, actual.height, actual.pixel_format
+                );
+                self.config.width = actual.width;
+                self.config.height = actual.height;
+                self.config.format = actual.pixel_format;
+            }
+        }
+        self.device = Some(chosen.id);
+        self.capturing = true;
+        self.sequence = 0;
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> IrisResult<()> {
+        if let Some(id) = self.device.take() {
+            // Best effort: the device may already be gone (unplug).
+            let _ = self.uvc.close_device(&id).await;
+        }
+        self.capturing = false;
+        Ok(())
+    }
+
+    async fn next_frame(&mut self) -> IrisResult<CaptureFrame> {
+        if !self.capturing {
+            return Err(iris_core::error::IrisError::Capture("not capturing".into()));
+        }
+        let id = self
+            .device
+            .clone()
+            .ok_or_else(|| iris_core::error::IrisError::Capture("no open device".into()))?;
+        let data = self.uvc.read_frame(&id).await.map_err(Self::map_err)?;
+        self.sequence += 1;
+        Ok(CaptureFrame {
+            sequence: self.sequence,
+            width: self.config.width,
+            height: self.config.height,
+            format: self.config.format.clone(),
+            data,
+            timestamp_us: CaptureFrame::now_us(),
+            is_cropped: false,
+        })
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.capturing
+    }
+}

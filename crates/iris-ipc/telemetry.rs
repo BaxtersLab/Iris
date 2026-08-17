@@ -69,9 +69,27 @@ pub enum TelemetryEvent {
         height: u32,
         size_bytes: usize,
     },
+    /// GestureDetected: emitted by the capture/vision pipeline when a calibrated
+    /// gesture is recognized. `gesture` is a stable name (e.g., "thumbs_up_right").
+    /// `score` is a confidence 0.0..1.0 and `user_id` is optional to support
+    /// per-user calibration/profiles.
+    GestureDetected {
+        gesture: String,
+        score: f32,
+        user_id: Option<String>,
+    },
     FrameDropped {
         sequence: u64,
         reason: String,
+    },
+    /// OverlayFieldMoved: emitted by the UI when a user moves or resizes an overlay field.
+    /// Contains the `id` and new geometry in pixels relative to the UI canvas.
+    OverlayFieldMoved {
+        id: u32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
     },
     CaptureError {
         message: String,
@@ -92,6 +110,12 @@ pub enum TelemetryEvent {
     },
     ProfileSaved {
         name: String,
+    },
+    /// Emitted when overlay->control mappings are saved from the UI.
+    /// `path` is the full path to the mappings TOML file.
+    MappingsUpdated {
+        path: String,
+        controls_applied: usize,
     },
 
     SubscriberAdded {

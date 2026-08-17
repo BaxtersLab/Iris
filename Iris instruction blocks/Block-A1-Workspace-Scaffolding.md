@@ -3,13 +3,13 @@ Block A-1 — Workspace Scaffolding
 
 Objective
 ---------
-Create the Iris Rust workspace at C:\Users\Baxter\Desktop\Iris with all 8 crate
+Create the Iris Rust workspace at %USERPROFILE%\Desktop\Iris with all 8 crate
 stubs, workspace Cargo.toml, README, LICENSE, and .gitignore. After this block,
 `cargo check` must pass with zero errors in the workspace root.
 
 Workspace Root
 --------------
-Path: C:\Users\Baxter\Desktop\Iris\Cargo.toml
+Path: %USERPROFILE%\Desktop\Iris\Cargo.toml
 
 ```toml
 [workspace]
@@ -307,7 +307,7 @@ Acceptance Criteria
 5. Directory structure matches:
 
 ```
-C:\Users\Baxter\Desktop\Iris\
+%USERPROFILE%\Desktop\Iris\
     Cargo.toml
     README.md
     LICENSE

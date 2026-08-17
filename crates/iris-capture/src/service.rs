@@ -161,8 +161,13 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
                                 }
                             }
 
-                            // estimate actual frame size before moving frame into buffer
+                            // capture authoritative per-frame facts before the
+                            // frame moves into the buffer (the backend may
+                            // deliver a different mode than configured)
                             let frame_size_bytes = frame.size_bytes();
+                            let frame_width = frame.width;
+                            let frame_height = frame.height;
+                            let frame_format = frame.format.clone();
 
                             // push into internal buffer with drop policy handling
                             let mut dropped = false;
@@ -195,8 +200,8 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
                                     frames_dropped: self.drop_count.load(Ordering::Relaxed),
                                     current_fps: self.config.target_fps as f64,
                                     target_fps: self.config.target_fps,
-                                    resolution: format!("{}x{}", self.config.width, self.config.height),
-                                    format: format!("{}", self.config.format),
+                                    resolution: format!("{}x{}", frame_width, frame_height),
+                                    format: format!("{}", frame_format),
                                     size_bytes: frame_size_bytes,
                                     queue_depth: self.config.max_queue_depth,
                                     roi_active: self.roi.is_some(),
@@ -223,6 +228,13 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
 impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
     fn apply_roi(frame: &mut CaptureFrame, roi: Roi) {
         match frame.format {
+            // MJPEG is a compressed stream — there is no pixel grid to slice, so
+            // ROI cannot be applied without a full JPEG decode. Leave the frame
+            // untouched and report it as uncropped rather than corrupting the
+            // JPEG by byte-slicing it as if it were raw pixels.
+            PixelFormat::Mjpeg => {
+                frame.is_cropped = false;
+            }
             PixelFormat::Rgb24 | PixelFormat::Bgr24 => {
                 let bpp = 3usize;
                 let src_w = frame.width as usize;

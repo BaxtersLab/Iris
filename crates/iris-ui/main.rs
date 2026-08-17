@@ -6,8 +6,19 @@ async fn main() {
         eprintln!("failed to init logging: {}", e);
     }
 
-    // Try to bootstrap the Iris runtime with default config
-    let cfg = iris_core::config::IrisConfig::default();
+    // Load `iris.toml` (next to the executable) if present, else fall back to
+    // defaults. Previously this called `IrisConfig::default()` unconditionally,
+    // so the whole config-file mechanism — `IrisConfig::load()`/`save()`/
+    // `config_path()` and any `iris.toml` on disk — was unreachable, and capture
+    // resolution was permanently pinned to the 3840x2160 default. Article XI §3:
+    // route through the configurable mechanism that already exists.
+    let cfg = match iris_core::config::IrisConfig::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("config load failed ({e}); falling back to defaults");
+            iris_core::config::IrisConfig::default()
+        }
+    };
     match iris_ui::bootstrap::IrisRuntime::bootstrap(cfg).await {
         Ok(_rt) => {
             // Keep runtime alive while UI runs; pass the IPC handle into the UI so it can send commands and subscribe to telemetry.
