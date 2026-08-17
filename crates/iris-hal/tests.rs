@@ -201,4 +201,180 @@ mod tests {
         eprintln!("formats: {:?}", caps.formats);
         assert!(!caps.formats.is_empty(), "capture device reported no supported formats");
     }
+
+    /// The five formerly-`NotImplemented` methods must report real state.
+    /// Needs no camera: an un-opened backend has to answer `DeviceNotOpen`,
+    /// which is only possible once the stubs are actually gone. If any of these
+    /// regress to `NotImplemented` the match fails.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn v4l2_unopened_device_reports_not_open_not_unimplemented() {
+        use crate::backend::UvcBackend as _;
+        use crate::device::DeviceId;
+        use crate::error::HalError;
+        use crate::v4l2_backend::v4l2::V4l2UvcBackend;
+
+        let backend = V4l2UvcBackend::new();
+        let id = DeviceId("/dev/video-does-not-exist".into());
+
+        assert!(
+            matches!(backend.read_frame(&id).await, Err(HalError::DeviceNotOpen)),
+            "read_frame on an unopened device must be DeviceNotOpen"
+        );
+        assert!(
+            matches!(backend.close_device(&id).await, Err(HalError::DeviceNotOpen)),
+            "close_device on an unopened device must be DeviceNotOpen"
+        );
+        assert!(
+            matches!(
+                backend.get_control(&id, 0x0098_0900).await,
+                Err(HalError::DeviceNotOpen)
+            ),
+            "get_control on an unopened device must be DeviceNotOpen"
+        );
+        assert!(
+            matches!(
+                backend.set_control(&id, 0x0098_0900, 1).await,
+                Err(HalError::DeviceNotOpen)
+            ),
+            "set_control on an unopened device must be DeviceNotOpen"
+        );
+        assert!(
+            matches!(backend.current_format(&id).await, Ok(None)),
+            "current_format on an unopened device must be Ok(None)"
+        );
+    }
+
+    /// Opening a path that is not a V4L2 node must fail cleanly rather than
+    /// panicking or leaving state behind.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn v4l2_open_bad_path_fails_cleanly_and_leaves_backend_closed() {
+        use crate::backend::UvcBackend as _;
+        use crate::device::DeviceId;
+        use crate::error::HalError;
+        use crate::v4l2_backend::v4l2::V4l2UvcBackend;
+
+        let backend = V4l2UvcBackend::new();
+        let id = DeviceId("/dev/null".into());
+        assert!(backend.open_device(&id).await.is_err(), "/dev/null is not a capture device");
+        // the failed open must not have left a half-open device behind
+        assert!(
+            matches!(backend.read_frame(&id).await, Err(HalError::DeviceNotOpen)),
+            "a failed open must leave the backend closed"
+        );
+    }
+
+    /// Hardware-gated V4L2 CAPTURE test — IRIS_USE_HW=1 plus a real webcam.
+    /// This is the Linux mirror of `wmf_capture_real_frames`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn v4l2_capture_real_frames() {
+        if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
+            eprintln!("skipping v4l2_capture_real_frames (set IRIS_USE_HW=1)");
+            return;
+        }
+        use crate::backend::UvcBackend as _;
+        use crate::device::PixelFormat;
+        use crate::error::HalError;
+        use crate::v4l2_backend::v4l2::V4l2UvcBackend;
+
+        let backend = V4l2UvcBackend::new();
+        let devs = backend.enumerate_devices().await.expect("enumerate failed");
+        assert!(!devs.is_empty(), "no capture device present");
+        let id = devs[0].id.clone();
+        eprintln!("opening {} — {}", devs[0].id, devs[0].name);
+
+        backend.open_device(&id).await.expect("open_device failed");
+
+        let fmt = backend
+            .current_format(&id)
+            .await
+            .expect("current_format failed")
+            .expect("an open device must report the format it granted");
+        eprintln!(
+            "negotiated: {}x{} @{}fps {:?}",
+            fmt.width, fmt.height, fmt.fps, fmt.pixel_format
+        );
+        assert!(
+            fmt.width > 0 && fmt.height > 0,
+            "driver reported a zero-sized format"
+        );
+
+        assert!(
+            matches!(
+                backend.open_device(&id).await,
+                Err(HalError::DeviceAlreadyOpen)
+            ),
+            "opening an already-open device must be refused"
+        );
+
+        let controls = backend.list_controls(&id).await.expect("list_controls failed");
+        eprintln!("controls exposed: {}", controls.len());
+
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        for i in 0..5 {
+            let frame = backend
+                .read_frame(&id)
+                .await
+                .unwrap_or_else(|e| panic!("read_frame {i} failed: {e}"));
+            assert!(!frame.is_empty(), "frame {i} came back empty");
+            frames.push(frame);
+        }
+        eprintln!(
+            "frame sizes: {:?}",
+            frames.iter().map(|f| f.len()).collect::<Vec<_>>()
+        );
+
+        // Prove the bytes are a real frame rather than an uninitialised or
+        // stale mapping. MJPEG frames are self-describing: SOI at the start,
+        // EOI at the end. For raw formats the size is fully determined, so
+        // check that instead.
+        match fmt.pixel_format {
+            PixelFormat::Mjpeg => {
+                for (i, f) in frames.iter().enumerate() {
+                    assert_eq!(
+                        &f[..2],
+                        &[0xFF, 0xD8],
+                        "frame {i} has no JPEG SOI marker — not a decodable frame"
+                    );
+                    let eoi = f
+                        .windows(2)
+                        .rposition(|w| w == [0xFF, 0xD9])
+                        .unwrap_or_else(|| panic!("frame {i} contains no JPEG EOI marker"));
+                    eprintln!(
+                        "  frame {i}: len={} eoi_at={} trailing={}",
+                        f.len(),
+                        eoi,
+                        f.len() - (eoi + 2)
+                    );
+                    // EOI must be at the end, allowing a padding byte: this
+                    // camera pads each frame to an even length, so a JPEG whose
+                    // natural length is odd carries one trailing stuffing byte.
+                    // That is padding, not truncation — a torn frame stops
+                    // thousands of bytes early or has no EOI at all, which this
+                    // still catches.
+                    let trailing = f.len() - (eoi + 2);
+                    assert!(
+                        trailing <= 2,
+                        "frame {i} is truncated: EOI at {eoi} of {} bytes ({trailing} trailing)",
+                        f.len()
+                    );
+                }
+            }
+            PixelFormat::Yuyv => {
+                let expected = (fmt.width * fmt.height * 2) as usize;
+                for (i, f) in frames.iter().enumerate() {
+                    assert_eq!(f.len(), expected, "YUYV frame {i} is the wrong size");
+                }
+            }
+            other => eprintln!("no size/marker rule for {other:?}; length checked only"),
+        }
+
+        backend.close_device(&id).await.expect("close_device failed");
+        assert!(
+            matches!(backend.read_frame(&id).await, Err(HalError::DeviceNotOpen)),
+            "reading after close must fail"
+        );
+    }
 }
