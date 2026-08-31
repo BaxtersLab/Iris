@@ -13,11 +13,20 @@ Iris is a tool, not a brain.
 - iris-hrt: health, runtime, thermal monitoring
 - iris-hal: UVC hardware abstraction — WMF backend (Windows), V4L2 backend (Linux), mock
 - iris-capture: capture pipeline — CaptureService, UvcCaptureBackend adapter, DXGI screen backend (Windows)
-- iris-control: camera controls, capability queries, profiles
-- iris-stream: multi-subscriber output, ring buffer, IPC delivery
+- iris-control: **not implemented** — a declared placeholder for camera-control
+  profiles. The underlying controls do work one layer down, in `iris-hal`'s V4L2
+  backend (`get_control`/`set_control`/`list_controls`); this crate exposes no
+  API. See `ROADMAP.md`
+- iris-stream: **not implemented** — a declared placeholder for multi-subscriber
+  frame fan-out. Telemetry fan-out and the bounded frame queue already exist, in
+  `iris-ipc` and `iris-capture` respectively; this crate exposes no API. See
+  `ROADMAP.md`
 - iris-ui: the camera app (egui, charcoal theme) + bootstrap runtime
 - iris-harness: test-stream generator (ffmpeg MPEG-TS / deterministic JSONL)
-- iris-ipc-pipe-bridge (standalone): JSON-lines envelope bridge — named pipe (Windows) / unix socket (Linux)
+- iris-ipc-pipe-bridge (standalone): JSON-lines envelope bridge — named pipe
+  (Windows) / unix socket (Linux). **Outside the Cargo workspace**, so
+  `cargo build --workspace` and `cargo test --workspace` do not cover it; build
+  it with `--manifest-path crates/iris-ipc-pipe-bridge/Cargo.toml`
 
 ## Prerequisites
 

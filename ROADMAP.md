@@ -94,6 +94,47 @@ than left silently incomplete. Format:
 
       Needs a Windows box.
 
+## Unbuilt crates — declared 2026-08-31
+
+Both existed as one-function crates that **the README advertised as delivered
+features**. Neither was declared here, which made them undeclared stubs in
+shipped product code (Article VII §2–3). The fake APIs are gone, the README is
+corrected, and the gaps are declared below. Found by asking which crates
+contribute **zero tests** — a question a green workspace total cannot answer.
+
+- [ ] STUB: `iris-control` — camera-control abstraction. Specification
+      (instruction block F-1) calls for `control`, `profile` and `service`
+      modules covering exposure, gain, focus, zoom and white balance through
+      `iris-hal`, plus named profiles and a `ControlService`.
+      **Until 2026-08-31 it exported `apply_profile(_: &str) -> bool { true }`**
+      — it ignored the profile and reported success for work it had not done,
+      which a caller could not distinguish from the real thing. Nothing ever
+      called it. The function was removed rather than left: an empty crate is
+      honest, a function that always returns `true` is not.
+      **Partly available one layer down:** `iris-hal`'s V4L2 backend implements
+      `get_control`/`set_control`/`list_controls` (11 controls on the reference
+      camera). Build this on the HAL rather than re-deriving it — and note the
+      WMF side of those is itself unimplemented, above.
+
+- [ ] STUB: `iris-stream` — multi-subscriber frame streaming. Specification
+      (instruction block G-1) calls for `mode`, `subscriber`, `ring_buffer`,
+      `service` and `telemetry` modules with four output modes (Pull, Push,
+      SharedMemory, IPC). Until 2026-08-31 it exported
+      `stream_info() -> &'static str { "stream" }`, a literal nothing called.
+      **Scope is smaller than it looks:** `iris-ipc` already broadcasts
+      telemetry to multiple subscribers, and `iris-capture`'s `CaptureService`
+      already owns a bounded frame queue with an explicit drop policy. What is
+      genuinely missing is **frame** fan-out beyond one consumer, plus the
+      shared-memory and IPC transports.
+
+- [ ] GAP: `iris-ipc-pipe-bridge` is **not a Cargo workspace member**, so
+      `cargo build --workspace` and `cargo test --workspace` have never covered
+      its 308 lines, and it has **no tests of its own**. `IRIS_LINUX_NOTES.md`
+      records a container-verified UDS loopback smoke pass that has not been
+      re-run on this box. Its `Cargo.lock` is deliberately gitignored because
+      nothing here has ever resolved it. Build it, test it, then either add it
+      to `members` or record why it stands outside.
+
 ## GUI memory leak — FOUND AND FIXED (2026-08-01, Linux workstation)
 
 - [x] **FIXED**: `iris-ui` leaked one full RGBA preview image per captured frame
