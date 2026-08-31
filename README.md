@@ -42,6 +42,17 @@ cargo build --release
 
 ## Run
 
+On Linux use the launcher. It scrubs the snap-contaminated environment a
+terminal inside a snapped editor exports — eighteen variables measured on the
+reference box, `LOCPATH` among them, which drags a host binary onto a different
+glibc — and it reports which `iris.toml` was picked up:
+
+```sh
+./run.sh                                 # Linux launcher (does the env scrub)
+```
+
+Running the binary directly works too, and is what `run.sh` ends up doing:
+
 ```sh
 cargo run -p iris-ui                     # mock backend (default)
 IRIS_BACKEND=wmf  cargo run -p iris-ui   # real camera via Windows Media Foundation
@@ -50,6 +61,17 @@ IRIS_BACKEND=dxgi cargo run -p iris-ui   # Windows screen capture
 IRIS_UI_HEADLESS=1 ...                   # scripted headless run (no window)
 IRIS_DEVICE=<id-or-name-substring>       # pick a specific camera
 ```
+
+### Configuration
+
+`iris.toml` is read from **the directory containing the executable** — so
+`target/release/iris.toml` for a release build, not the repository root.
+`run.sh` prints the path it looked at. Anything missing or invalid falls back to
+the built-in defaults, with the reason printed; `capture.width`,
+`capture.height`, `capture.target_fps`, `capture.pixel_format`
+(`rgb24`/`bgr24`/`nv12`/`yuyv`/`mjpeg`, with `yuy2` accepted for `yuyv`),
+`capture.max_queue_depth` and `capture.drop_policy` (`oldest`/`newest`) all
+drive capture.
 
 ## Test
 
@@ -60,12 +82,20 @@ IRIS_USE_HW=1 cargo test -p iris-hal  # hardware-gated: real camera enumerate + 
 
 ## Status
 
-Windows: **finished v1 loop** — enumerate → open → real frames →
-authoritative telemetry (frame-true resolution/format/size) → live NV12/YUYV
-preview in the UI. Verified against real hardware (USB camera, 1920×1080 NV12).
-Linux: builds and tests clean on Ubuntu 26.04 — `cargo test --workspace` is
-60/60 with zero warnings. V4L2 device enumeration and format probing are
-implemented; full V4L2 frame capture is the next block. See `ROADMAP.md`.
+**Windows** — finished v1 loop: enumerate → open → real frames → authoritative
+telemetry (frame-true resolution/format/size) → live NV12/YUYV preview in the
+UI. Verified against real hardware (USB camera, 1920×1080 NV12).
+
+**Linux** — at parity, verified against real hardware: full V4L2 streaming
+capture (REQBUFS/QUERYBUF/mmap/QBUF/DQBUF/STREAMON plus the control ioctls) with
+MJPEG decoded for both the preview and ROI cropping, proven at 1920×1080 @30 fps
+MJPEG. Enumeration reports all of a camera's modes, not just the uncompressed
+ones.
+
+`cargo test --workspace` is **102 passing, 0 failing, zero build warnings** on
+Ubuntu 26.04. Remaining declared work is in `ROADMAP.md`; the only open item is
+a duplicate Windows Media Foundation backend, which needs a Windows box to
+resolve.
 
 ## License
 

@@ -4,6 +4,36 @@ All notable changes in this workspace since the previous local snapshot.
 
 Unreleased
 ----------
+UI thread unblocked, config surface made real — 2026-08-31 (Linux workstation)
+- **The preview drain was a livelock, not a perf nit.** `ui_app.rs` looped on
+  `try_recv` until `Empty` while converting each frame inline, so once a
+  conversion cost about as much as the gap between frames the producer refilled
+  the channel as fast as the loop drained it and `update()` never returned to
+  the event loop. Measured over 30 s with no user input: **1 repaint** at
+  640x480 NV12 @30 and at 3840x2160 @30. Now `drain_to_newest()` — pop the
+  backlog without converting, convert only the survivor, cap one drain at
+  `MAX_DRAIN_PER_REPAINT` — giving **453** and **25** repaints on the same runs.
+- **Nothing in the app ever requested a repaint.** egui's loop is reactive, so
+  the live preview only advanced while the window was receiving input; leave it
+  alone or cover it and it froze while capture ran on. `drive_repaints()` paces
+  the window at ~60 Hz while capturing, 4 Hz idle.
+- **Latent UI-thread panic fixed**: the RGB24/BGR24 conversion read `d[i + 1]`
+  off an index step, so a buffer whose length was not a multiple of 3 indexed
+  past the end. Now `chunks_exact(3).take(w * h)`.
+- **`capture.pixel_format` and `capture.drop_policy` were dead config.**
+  `bootstrap.rs` hardcoded `Bgr24` and `Oldest`; the default config said `nv12`.
+  Both are now routed. Frame size in telemetry moved 921600 -> 460800 bytes at
+  640x480, and to 614400 with `pixel_format = "yuy2"`.
+- **`IrisConfig::validate()` had no caller outside its own tests.** `main.rs`
+  now validates after loading and falls back to defaults with the reason
+  printed. The accepted format list dropped `bgra8` (unproducible, and 4 bytes
+  per pixel where the nearest variant is 3) and gained `rgb24`/`bgr24`; a test
+  in `iris-hal` pins that list against the parser so they cannot drift.
+- `run.sh` added — the Linux launcher, with the snap-environment scrub the rest
+  of the suite uses. Iris had no launcher at all.
+- Gate: **76 -> 102 tests**, 0 failures, 0 build warnings. `iris-ui` had no unit
+  tests before this; the preview conversion and drain now have 15.
+
 Reconciliation + real-camera finish — 2026-07-18
 - Restored the capture pipeline (backend/service/frame/telemetry + DXGI) that
   the March drift deleted; revived the camera UI as the `iris-ui` bin.

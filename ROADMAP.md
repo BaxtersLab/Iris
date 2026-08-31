@@ -76,10 +76,62 @@ than left silently incomplete. Format:
       640×480×4 exactly. Residual 22.8 MB is one-time startup allocation (fonts, GL context) held
       until exit and is **not** growing.
 
-- [ ] PERF (not a leak, still worth doing): the frame drain in `ui_app.rs` is
-      `loop { rx.try_recv() }` and converts **every** queued frame to RGBA, uploading each one,
-      even though only the last is ever displayed. Draining to the newest frame and converting once
-      would cut redundant conversion work at high frame rates.
+- [x] **DONE 2026-08-31** — ~~PERF: the frame drain in `ui_app.rs` converts every queued frame~~.
+      It was filed as a perf nit. It was **a hang**. The loop only ended when `try_recv` returned
+      `Empty`, and each iteration converted a frame inline on the UI thread, so once a conversion
+      cost about as much as the interval between frames the producer refilled the channel as fast
+      as the loop drained it and `update()` never returned to the event loop.
+      **Measured on this box, debug build, mock backend, 30 s runs, no user input:**
+
+      | config | repaints BEFORE | repaints AFTER |
+      |---|---|---|
+      | 640x480 NV12 @30 (`target_fps` 2) | 647 / 15 s | — (never reproduced; the loop kept up) |
+      | 640x480 NV12 @30 | **1** | **453** |
+      | 3840x2160 NV12 @30 | **1** | **25** |
+
+      One repaint in thirty seconds is a frozen window with a pinned core. The fix is
+      `drain_to_newest()`: pop the backlog without converting, convert only the survivor, and cap
+      one drain at `MAX_DRAIN_PER_REPAINT` so the UI thread does bounded work no matter how far
+      behind it is. Conversions saved, same runs: 355 of 742 frames at 640x480 (52.2% converted),
+      94 of 115 at 4K (18.3% converted). MJPEG makes the old shape worse still, since each
+      conversion is then a full JPEG decode.
+
+- [x] **DONE 2026-08-31** — the app never asked to be repainted. `grep -r request_repaint` returned
+      **nothing**. egui's run loop is reactive: it calls `update()` on input and window events and
+      otherwise sleeps, so the live camera preview only advanced while the pointer or keyboard was
+      generating events over the window. Unfocused or covered, it froze on the last frame while
+      capture ran on behind it. `drive_repaints()` now paces the window at ~60 Hz while a capture
+      receiver exists and 4 Hz when idle.
+
+- [x] **DONE 2026-08-31** — latent panic in the preview conversion. The RGB24/BGR24 arms read
+      `d[i + 1]` and `d[i + 2]` off an index step, so a buffer whose length was not a multiple of 3
+      — a short read, a truncated frame — indexed past the end and panicked **on the UI thread**.
+      Now `chunks_exact(3).take(w * h)`, so a short buffer degrades to a skipped frame.
+      Falsified: restoring the index form fails `a_ragged_rgb_buffer_does_not_panic` with an
+      out-of-bounds panic at that exact line.
+
+## Config surface — declared but not routed, opened and closed 2026-08-31
+
+- [x] **DONE 2026-08-31** — `capture.pixel_format` and `capture.drop_policy` were dead strings.
+      `bootstrap.rs` hardcoded `PixelFormat::Bgr24` and `DropPolicy::Oldest` while both fields sat
+      in `IrisConfig`, were serialised, and were range-checked by `validate()`. The default config
+      says `nv12`; capture ran BGR24. Proven by the frame size in telemetry: `size_bytes: 921600`
+      (640x480x3) before, `460800` (640x480x1.5) after, and `614400` (x2) with `pixel_format
+      = "yuy2"`. Same shape as the 2026-08-01 finding that `IrisConfig::load()` itself was never
+      called — Article XI §3, one level down.
+
+- [x] **DONE 2026-08-31** — `IrisConfig::validate()` had **no caller outside its own tests**. A
+      file with an out-of-range width, an unknown drop policy or a nonsense log level was accepted
+      whole. `main.rs` now validates after loading and falls back to defaults with the reason
+      printed. Proven: `drop_policy = "banana"` →
+      `config invalid (config error: drop_policy must be 'oldest' or 'newest'); falling back to defaults`.
+
+- [x] **DONE 2026-08-31** — the accepted pixel-format list was wrong in both directions. It named
+      `bgra8`, which no Iris backend has ever produced and which is 4 bytes per pixel where the
+      nearest variant is 3, and it omitted `rgb24` and `bgr24` — one of which was what capture was
+      actually running. `ALLOWED_PIXEL_FORMATS` now lives in `iris-core` and a test in `iris-hal`
+      asserts every name it accepts can be parsed by `PixelFormat::from_config_name`, so the two
+      cannot drift apart again. `yuy2` is kept as the Windows spelling of `yuyv`.
 
 **Measured on Ubuntu 26.04 / NVIDIA 595.58.03, mock backend, GUI window open:**
 
@@ -106,12 +158,12 @@ than left silently incomplete. Format:
 This box has 121 GB, which is the only reason the app looked healthy. Baxters OS targets ordinary
 hardware, so this must be fixed before Iris ships in the ISO.
 
-**Suspects worth checking first** (untested hypotheses, in order): the per-frame
-`ctx.load_texture("iris_preview", ...)` call in `iris-ui/ui_app.rs` (egui defers texture frees to
-end-of-frame, so a UI repainting slower than the capture rate may hold several large textures at
-once); the `broadcast::channel(4096)` telemetry ring in `bootstrap.rs:245` combined with a slow
-receiver; and the `loop { rx.try_recv() }` drain in `ui_app.rs`, which converts **every** queued
-frame to RGBA and uploads a texture for each, discarding all but the last.
+**Suspects worth checking first** *(historical — kept for the reasoning; all three are now
+settled, so do not re-open them)*: the per-frame `ctx.load_texture("iris_preview", ...)` call in
+`iris-ui/ui_app.rs` — **this was the leak**, fixed 2026-08-01; the `broadcast::channel(4096)`
+telemetry ring in `bootstrap.rs` combined with a slow receiver — **not implicated**; and the
+`loop { rx.try_recv() }` drain, which converts every queued frame and discards all but the last —
+**real, and worse than suspected**: it was a UI-thread livelock, fixed 2026-08-31 above.
 
 ## Notes on MJPEG support (added 2026-08-01)
 
