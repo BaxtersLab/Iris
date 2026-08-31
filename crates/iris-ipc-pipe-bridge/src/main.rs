@@ -1,8 +1,9 @@
-use std::io::{BufRead, BufReader, Write};
+// The std::io reader/writer traits, Duration, std::sync::mpsc and std::thread
+// were all imported here and never used — this crate handles its streams with
+// tokio's async equivalents, and `handle_stream` imports `tokio::io::BufReader`
+// locally where it is actually needed. `IpcHandle` stays: it is used as a type
+// below. What was redundant was a second, function-local `use` of it.
 use std::sync::Arc;
-use std::time::Duration;
-use std::sync::mpsc as std_mpsc;
-use std::thread;
 
 use iris_ipc::{
     envelope::IpcEnvelope,
@@ -106,17 +107,88 @@ async fn main() -> anyhow::Result<()> {
 /// else /tmp/iris-stream.sock.
 #[cfg(unix)]
 fn unix_socket_path() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("IRIS_IPC_SOCKET") {
+    resolve_unix_socket_path(
+        std::env::var("IRIS_IPC_SOCKET").ok(),
+        std::env::var("XDG_RUNTIME_DIR").ok(),
+    )
+}
+
+/// The socket-path decision, with the environment passed in rather than read.
+///
+/// Split out so it can be tested: reading the environment inside the function
+/// makes the test mutate process-global state, which races every other test in
+/// the binary. The precedence is `IRIS_IPC_SOCKET`, then
+/// `$XDG_RUNTIME_DIR/iris-stream.sock`, then `/tmp/iris-stream.sock`.
+///
+/// **A unix socket path must fit in `sockaddr_un.sun_path`** — 108 bytes on
+/// Linux including the terminator — and `bind` fails with "path must be shorter
+/// than SUN_LEN" when it does not. That is a real failure mode, not a
+/// hypothetical: it was hit while first proving this transport, because the
+/// obvious scratch directory was 96 characters deep on its own. The default
+/// paths here are short, but an `IRIS_IPC_SOCKET` pointing somewhere deep will
+/// fail at bind time.
+fn resolve_unix_socket_path(
+    explicit: Option<String>,
+    runtime_dir: Option<String>,
+) -> std::path::PathBuf {
+    if let Some(p) = explicit.filter(|p| !p.is_empty()) {
         return std::path::PathBuf::from(p);
     }
-    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    let dir = runtime_dir.filter(|d| !d.is_empty()).unwrap_or_else(|| "/tmp".to_string());
     std::path::PathBuf::from(dir).join("iris-stream.sock")
+}
+
+#[cfg(test)]
+mod socket_path_tests {
+    use super::resolve_unix_socket_path;
+
+    #[test]
+    fn an_explicit_socket_wins() {
+        let p = resolve_unix_socket_path(Some("/run/custom.sock".into()), Some("/run/user/1000".into()));
+        assert_eq!(p.to_str(), Some("/run/custom.sock"));
+    }
+
+    #[test]
+    fn the_runtime_dir_is_used_when_no_explicit_socket() {
+        let p = resolve_unix_socket_path(None, Some("/run/user/1000".into()));
+        assert_eq!(p.to_str(), Some("/run/user/1000/iris-stream.sock"));
+    }
+
+    #[test]
+    fn tmp_is_the_last_resort() {
+        let p = resolve_unix_socket_path(None, None);
+        assert_eq!(p.to_str(), Some("/tmp/iris-stream.sock"));
+    }
+
+    /// An env var set to the empty string is set, and `std::env::var` returns
+    /// `Ok("")` for it — which would otherwise bind a socket at `/iris-stream.sock`
+    /// or at the empty path.
+    #[test]
+    fn empty_env_values_are_treated_as_unset() {
+        assert_eq!(
+            resolve_unix_socket_path(Some(String::new()), Some(String::new())).to_str(),
+            Some("/tmp/iris-stream.sock")
+        );
+    }
+
+    /// The default paths must leave room inside sockaddr_un's 108-byte
+    /// sun_path, or the bridge cannot bind at all on a normal system.
+    #[test]
+    fn the_default_paths_fit_in_sun_path() {
+        const SUN_PATH_MAX: usize = 108;
+        for p in [
+            resolve_unix_socket_path(None, None),
+            resolve_unix_socket_path(None, Some("/run/user/1000".into())),
+        ] {
+            let len = p.as_os_str().len();
+            assert!(len < SUN_PATH_MAX, "{p:?} is {len} bytes, too long to bind");
+        }
+    }
 }
 
 mod iris_dispatcher {
     use iris_ipc::response::{IpcResponse, ResponseData};
     use iris_ipc::command::IpcCommand;
-    use iris_ipc::server::IpcHandle;
     use std::pin::Pin;
     use std::future::Future;
 
@@ -155,7 +227,7 @@ where
 
     // Split stream into read/write halves and protect writer with a mutex for atomic writes
     let (read_half, write_half) = tokio::io::split(server);
-    let mut reader = BufReader::new(read_half);
+    let reader = BufReader::new(read_half);
     let writer = Arc::new(Mutex::new(write_half));
 
     // Telemetry forwarder: write telemetry envelopes as JSON lines

@@ -9,6 +9,11 @@ members = [
     "crates/iris-stream",
     "crates/iris-ui",
     "crates/iris-harness",
+    # Added 2026-08-31. It carried an empty `[workspace]` table, which made it its
+    # own workspace root and kept 308 lines of shipped code out of every gate
+    # this box has ever run — it built with 8 warnings against a zero-warning
+    # bar nobody was holding it to.
+    "crates/iris-ipc-pipe-bridge",
 ]
 
 [profile.release]

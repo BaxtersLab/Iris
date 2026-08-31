@@ -2397,6 +2397,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-ipc-pipe-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "iris-ipc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
 name = "iris-stream"
 version = "0.1.1"
 dependencies = [
