@@ -445,6 +445,18 @@ mod mjpeg_hardware_tests {
             eprintln!("skipping real_camera_mjpeg_frame_decodes (set IRIS_USE_HW=1)");
             return;
         }
+        // IRIS_USE_HW=1 says "exercise the hardware", not "a camera is
+        // guaranteed". Tell the two apart: with no /dev/video* node at all
+        // nothing is plugged in, which is an environment fact and a skip. With
+        // a node present but nothing enumerated, that IS the regression this
+        // test exists to catch, and the assert below fires.
+        if !iris_hal::v4l2_backend::v4l2::V4l2UvcBackend::video_nodes_present() {
+            eprintln!(
+                "SKIP {}: IRIS_USE_HW=1 but no /dev/video* node exists — no camera attached",
+                "real_camera_mjpeg_frame_decodes"
+            );
+            return;
+        }
         use iris_hal::backend::UvcBackend as _;
         use iris_hal::device::PixelFormat;
         use iris_hal::v4l2_backend::v4l2::V4l2UvcBackend;

@@ -636,6 +636,28 @@ pub mod v4l2 {
             Ok(out)
         }
 
+        /// Whether the system exposes any `/dev/video*` node at all.
+        ///
+        /// This is **not** "a camera is usable" — a node can exist and still be
+        /// a metadata or output node, or be claimed by another process.
+        /// `enumerate_sync` answers the usable question. This answers the
+        /// cheaper one that comes before it: is there any video hardware here?
+        ///
+        /// It exists so callers can tell an **environment** fact (nothing is
+        /// plugged in) from a **regression** (nodes are present and enumeration
+        /// still found nothing). The hardware-gated tests use it for exactly
+        /// that: with no node present they skip, and with a node present but no
+        /// device enumerated they fail, which is the case worth catching.
+        pub fn video_nodes_present() -> bool {
+            match fs::read_dir("/dev") {
+                Ok(entries) => entries
+                    .flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .any(|n| is_video_node(&n)),
+                Err(_) => false,
+            }
+        }
+
         /// Enumerate all V4L2 capture devices. Returns an empty list (not an
         /// error) when no camera is present — mirrors WMF behaviour.
         pub fn enumerate_sync() -> HalResult<Vec<DeviceInfo>> {

@@ -89,7 +89,13 @@ async fn main() {
             }
 
             let options = eframe::NativeOptions::default();
-            let _ = eframe::run_native(
+            // `run_native`'s error was discarded here. If the window could not
+            // be created — no display, no GL context, a compositor refusing the
+            // surface — the process carried on with the capture pipeline
+            // running, no window, and not one word on stderr. It looked like a
+            // hang. Report it, and exit non-zero so a launcher or a script can
+            // tell that the app did not come up.
+            let run = eframe::run_native(
                 "Iris",
                 options,
                 Box::new(move |cc| {
@@ -105,9 +111,16 @@ async fn main() {
                     Box::new(iris_ui::ui_app::IrisApp::new(ipc.clone(), capture_handle))
                 }),
             );
+            if let Err(e) = run {
+                eprintln!("failed to open the Iris window: {e}");
+                std::process::exit(1);
+            }
         }
         Err(e) => {
+            // Same reasoning as the window failure above: a bootstrap that
+            // cannot start is not a successful run, so do not exit 0 on it.
             eprintln!("Bootstrap failed: {}", e);
+            std::process::exit(1);
         }
     }
 }

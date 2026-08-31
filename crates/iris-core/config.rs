@@ -170,16 +170,54 @@ impl IrisConfig {
         Ok(p)
     }
 
-    pub fn load() -> IrisResult<Self> {
-        let path = Self::config_path()?;
-        if path.exists() {
-            let s = std::fs::read_to_string(&path).map_err(IrisError::Io)?;
-            let cfg: IrisConfig =
-                toml::from_str(&s).map_err(|e| IrisError::Config(format!("toml parse: {}", e)))?;
-            Ok(cfg)
-        } else {
-            Ok(IrisConfig::default())
+    /// Every place an `iris.toml` is looked for, in priority order.
+    ///
+    /// The executable's own directory stays **first** so nothing that worked
+    /// before this changes, but it cannot be the only one: an installed build
+    /// puts the binary somewhere the user cannot write (`/usr/bin`), and a dev
+    /// build hides it in `target/release/`, which is nobody's idea of where
+    /// configuration lives. The XDG locations are the conventional answer on
+    /// Linux and are what a packaged Iris will use.
+    ///
+    /// `$XDG_CONFIG_HOME` is honoured only when absolute, per the XDG basedir
+    /// spec, which says a relative value must be ignored.
+    pub fn config_search_paths() -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+
+        if let Ok(p) = Self::config_path() {
+            paths.push(p);
         }
+
+        let xdg = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+        if let Some(dir) = xdg {
+            paths.push(dir.join("iris").join("iris.toml"));
+        }
+
+        paths
+    }
+
+    /// Load the first `iris.toml` found along [`config_search_paths`].
+    ///
+    /// A missing file everywhere is not an error — the built-in defaults are
+    /// returned. A file that is present but unreadable or malformed **is** an
+    /// error, so it is reported rather than silently skipped in favour of a
+    /// lower-priority file: silently falling through would make a typo in the
+    /// user's own config look like the config being ignored.
+    pub fn load() -> IrisResult<Self> {
+        for path in Self::config_search_paths() {
+            if !path.exists() {
+                continue;
+            }
+            let s = std::fs::read_to_string(&path).map_err(IrisError::Io)?;
+            let cfg: IrisConfig = toml::from_str(&s).map_err(|e| {
+                IrisError::Config(format!("toml parse ({}): {}", path.display(), e))
+            })?;
+            return Ok(cfg);
+        }
+        Ok(IrisConfig::default())
     }
 
     pub fn save(&self) -> IrisResult<()> {

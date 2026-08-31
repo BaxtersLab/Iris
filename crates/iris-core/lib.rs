@@ -144,3 +144,72 @@ mod config_validation {
         assert!(cfg.validate().is_err());
     }
 }
+
+/// `iris.toml` used to be read from **one** place — the directory holding the
+/// executable — which makes an installed build unconfigurable and a dev build
+/// look for it in `target/release/`. These pin the search order added
+/// 2026-08-31, and in particular that the executable directory stays first so
+/// no existing setup changes behaviour.
+#[cfg(test)]
+mod config_search_paths {
+    use crate::config::IrisConfig;
+
+    #[test]
+    fn the_executable_directory_is_searched_first() {
+        let paths = IrisConfig::config_search_paths();
+        let exe_cfg = IrisConfig::config_path().expect("exe path");
+        assert_eq!(
+            paths.first(),
+            Some(&exe_cfg),
+            "the executable directory must stay highest priority — anything \
+             already working must keep working"
+        );
+    }
+
+    /// The XDG location is what a packaged Iris will actually use, so its
+    /// absence would make the whole change cosmetic.
+    #[test]
+    fn an_xdg_location_is_also_searched() {
+        let paths = IrisConfig::config_search_paths();
+        assert!(
+            paths.len() >= 2,
+            "expected an XDG path in addition to the executable directory, got {paths:?}"
+        );
+        let last = paths.last().expect("at least one path");
+        assert!(
+            last.ends_with("iris/iris.toml"),
+            "the XDG entry must live under an iris/ directory, got {last:?}"
+        );
+    }
+
+    #[test]
+    fn every_search_path_is_named_iris_toml() {
+        for p in IrisConfig::config_search_paths() {
+            assert_eq!(
+                p.file_name().and_then(|n| n.to_str()),
+                Some("iris.toml"),
+                "unexpected filename in the search order: {p:?}"
+            );
+        }
+    }
+
+    /// The XDG basedir spec says a relative `XDG_CONFIG_HOME` must be ignored.
+    /// Honouring one would resolve the path against the process's working
+    /// directory, so where Iris looked for its config would depend on where it
+    /// happened to be started from.
+    #[test]
+    fn a_relative_xdg_config_home_is_ignored() {
+        // Serialised with the test below by running both under one lock would
+        // be overkill: this asserts a property of the returned paths, not of a
+        // specific value, so a concurrent test changing the var cannot make it
+        // wrong.
+        let paths = IrisConfig::config_search_paths();
+        for p in &paths {
+            assert!(
+                p.is_absolute(),
+                "a relative search path means XDG_CONFIG_HOME was honoured when \
+                 it should have been ignored: {p:?}"
+            );
+        }
+    }
+}

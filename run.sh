@@ -70,14 +70,25 @@ if [[ ! -x "$APP" ]]; then
     exit 1
 fi
 
-# iris.toml is read from the directory holding the executable
-# (IrisConfig::config_path). Say where that is, because it is not the tree root
-# and a config placed here would be silently ignored.
-CFG="$(dirname "$APP")/iris.toml"
-if [[ -f "$CFG" ]]; then
+# Report which iris.toml will actually be used. The search order in
+# IrisConfig::config_search_paths is: the directory holding the executable
+# first (so an existing side-by-side config keeps winning), then
+# $XDG_CONFIG_HOME/iris/iris.toml, then ~/.config/iris/iris.toml.
+#
+# Saying only "no config beside the binary" was actively misleading once the
+# XDG lookup landed: the app would load ~/.config/iris/iris.toml and the
+# launcher would announce built-in defaults.
+_xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
+[[ "$_xdg" = /* ]] || _xdg="$HOME/.config"   # XDG spec: ignore a relative value
+CFG=""
+for candidate in "$(dirname "$APP")/iris.toml" "$_xdg/iris/iris.toml"; do
+    if [[ -f "$candidate" ]]; then CFG="$candidate"; break; fi
+done
+if [[ -n "$CFG" ]]; then
     echo "[iris] config: $CFG"
 else
-    echo "[iris] no iris.toml at $CFG — using built-in defaults (3840x2160 @30)"
+    echo "[iris] no iris.toml found — using built-in defaults (3840x2160 @30)"
+    echo "[iris] searched: $(dirname "$APP")/iris.toml, $_xdg/iris/iris.toml"
 fi
 
 echo "[iris] launching $APP"

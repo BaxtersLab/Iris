@@ -217,6 +217,18 @@ mod tests {
             eprintln!("skipping v4l2_enumerate_real_devices (set IRIS_USE_HW=1)");
             return;
         }
+        // IRIS_USE_HW=1 says "exercise the hardware", not "a camera is
+        // guaranteed". Tell the two apart: with no /dev/video* node at all
+        // nothing is plugged in, which is an environment fact and a skip. With
+        // a node present but nothing enumerated, that IS the regression this
+        // test exists to catch, and the assert below fires.
+        if !crate::v4l2_backend::v4l2::V4l2UvcBackend::video_nodes_present() {
+            eprintln!(
+                "SKIP {}: IRIS_USE_HW=1 but no /dev/video* node exists — no camera attached",
+                "v4l2_enumerate_real_devices"
+            );
+            return;
+        }
         use crate::backend::UvcBackend as _;
         use crate::v4l2_backend::v4l2::V4l2UvcBackend;
         let backend = V4l2UvcBackend::new();
@@ -301,6 +313,18 @@ mod tests {
     async fn v4l2_capture_real_frames() {
         if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
             eprintln!("skipping v4l2_capture_real_frames (set IRIS_USE_HW=1)");
+            return;
+        }
+        // IRIS_USE_HW=1 says "exercise the hardware", not "a camera is
+        // guaranteed". Tell the two apart: with no /dev/video* node at all
+        // nothing is plugged in, which is an environment fact and a skip. With
+        // a node present but nothing enumerated, that IS the regression this
+        // test exists to catch, and the assert below fires.
+        if !crate::v4l2_backend::v4l2::V4l2UvcBackend::video_nodes_present() {
+            eprintln!(
+                "SKIP {}: IRIS_USE_HW=1 but no /dev/video* node exists — no camera attached",
+                "v4l2_capture_real_frames"
+            );
             return;
         }
         use crate::backend::UvcBackend as _;
