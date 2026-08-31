@@ -89,6 +89,15 @@ than left silently incomplete. Format:
       | 640x480 NV12 @30 | **1** | **453** |
       | 3840x2160 NV12 @30 | **1** | **25** |
 
+      **Reproduced on real hardware the same day**, `32e6:9221` at 1920x1080 MJPEG,
+      `IRIS_BACKEND=v4l2`, 30 s, no user input, against a build of `8364f2c`:
+      **3 repaints before, 34 after, with 589 frames captured in both runs** — so
+      the whole difference is the UI thread. It is 3 rather than 1 because MJPEG
+      arrives over USB with jitter, so the old loop occasionally reached `Empty`
+      and escaped; that intermittency is why it survived. On the camera the fix
+      avoids 87 full 1920x1080 JPEG decodes in 30 s
+      (`received=117 converted=30 skipped=87`).
+
       One repaint in thirty seconds is a frozen window with a pinned core. The fix is
       `drain_to_newest()`: pop the backlog without converting, convert only the survivor, and cap
       one drain at `MAX_DRAIN_PER_REPAINT` so the UI thread does bounded work no matter how far

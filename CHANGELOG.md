@@ -31,6 +31,14 @@ UI thread unblocked, config surface made real — 2026-08-31 (Linux workstation)
   in `iris-hal` pins that list against the parser so they cannot drift.
 - `run.sh` added — the Linux launcher, with the snap-environment scrub the rest
   of the suite uses. Iris had no launcher at all.
+- Verified on real hardware (`32e6:9221`, 1920x1080 @30 MJPEG):
+  `IRIS_USE_HW=1 cargo test --workspace` 102/0 with the hardware tests re-run
+  under `--nocapture` to prove they were not early-returning, and the livelock
+  reproduced on the camera itself — 3 repaints before vs 34 after over 30 s,
+  589 frames captured in both runs.
+- `Cargo.lock` is now committed: the workspace ships binaries, and `zune-jpeg`
+  decodes hardware-sourced JPEG, so leaving it unpinned for anyone cloning was
+  the wrong default.
 - Gate: **76 -> 102 tests**, 0 failures, 0 build warnings. `iris-ui` had no unit
   tests before this; the preview conversion and drain now have 15.
 
