@@ -73,6 +73,35 @@ mod tests {
         assert!(!devs.is_empty(), "No video capture devices found");
     }
 
+    /// The enumeration path `bootstrap.rs` actually uses must keep working now
+    /// that `WmfUvcBackend` is no longer a `UvcBackend`.
+    ///
+    /// The Linux mirror of this concern is
+    /// `v4l2_unopened_device_reports_not_open_not_unimplemented`, which proves
+    /// the V4L2 stubs are gone by asserting real state. The WMF stubs were
+    /// removed rather than filled, so the equivalent guard is different: that
+    /// the one call site still resolves and still returns real devices.
+    ///
+    /// Hardware-gated — it needs a camera Windows can see.
+    #[cfg(windows)]
+    #[test]
+    fn wmf_enumeration_survives_removing_the_backend_impl() {
+        if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
+            eprintln!("skipping wmf_enumeration_survives_removing_the_backend_impl (set IRIS_USE_HW=1)");
+            return;
+        }
+        let devs = crate::wmf_backend::wmf::WmfUvcBackend::enumerate_sync()
+            .expect("enumerate_sync failed");
+        eprintln!("WMF enumerate_sync found {} device(s):", devs.len());
+        for d in &devs {
+            eprintln!("  {} - {}", d.id, d.name);
+        }
+        assert!(
+            !devs.is_empty(),
+            "enumerate_sync returned no devices; bootstrap.rs would fall back to the mock backend"
+        );
+    }
+
     /// Hardware-gated WMF CAPTURE test — IRIS_USE_HW=1 + a real webcam.
     /// Proves the full deep-backend path: enumerate → open → read frames.
     #[cfg(windows)]

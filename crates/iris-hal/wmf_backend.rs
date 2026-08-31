@@ -1,18 +1,29 @@
-/// Windows Media Foundation UVC backend.
+/// Windows Media Foundation camera **enumeration**.
 ///
-/// Uses `MFEnumDeviceSources` with the video-capture attribute to enumerate
-/// every camera visible to Windows (USB UVC, built-in, IP cameras exposed via
-/// a driver, etc.).  Only available on Windows; guarded by `cfg(windows)`.
+/// Uses `MFEnumDeviceSources` with the video-capture attribute to list every
+/// camera visible to Windows (USB UVC, built-in, IP cameras exposed via a
+/// driver, etc.). Only available on Windows; guarded by `cfg(windows)`.
 ///
-/// This backend currently supports `enumerate_devices` only; all frame-read
-/// methods return `HalError::NotImplemented` until a full MF source pipeline
-/// is wired up.
+/// **This is deliberately not a `UvcBackend`.** Real capture on Windows is
+/// `backend::WmfBackend`, which owns a Media Foundation source reader and,
+/// crucially, thread-scoped COM state: its `new()` calls `CoInitializeEx` +
+/// `MFStartup` and its `Drop` calls `MFShutdown` + `CoUninitialize`, which is
+/// why `bootstrap.rs` builds one on a dedicated long-lived thread. This type
+/// carries none of that — `enumerate_sync` initialises COM, enumerates, and
+/// tears down again within the one call, so it is safe to call from anywhere,
+/// including an async task on an arbitrary worker thread.
+///
+/// It previously also implemented `UvcBackend` with five `NotImplemented`
+/// stubs (`open_device`, `close_device`, `read_frame`, `get_control`,
+/// `set_control`). Nothing ever called them — `bootstrap.rs` only ever used
+/// the associated `enumerate_sync` — but being a `UvcBackend` made this type
+/// indistinguishable from the real one at a call site, so picking the wrong
+/// one silently got you `NotImplemented` from something that looked like the
+/// camera backend. The impl is gone; the trap went with it.
 #[cfg(windows)]
 pub mod wmf {
-    use crate::backend::UvcBackend;
-    use crate::device::{DeviceCapabilities, DeviceId, DeviceInfo};
+    use crate::device::{DeviceId, DeviceInfo};
     use crate::error::{HalError, HalResult};
-    use async_trait::async_trait;
 
     use windows::{
         core::PWSTR,
@@ -146,49 +157,4 @@ pub mod wmf {
         }
     }
 
-    #[async_trait]
-    impl UvcBackend for WmfUvcBackend {
-        async fn enumerate_devices(&self) -> HalResult<Vec<DeviceInfo>> {
-            // Run blocking COM/MF work on a dedicated thread
-            tokio::task::spawn_blocking(WmfUvcBackend::enumerate_sync)
-                .await
-                .map_err(|e| HalError::Io(format!("spawn_blocking join error: {:?}", e)))?
-        }
-
-        async fn probe_capabilities(&self, _id: &DeviceId) -> HalResult<DeviceCapabilities> {
-            Ok(DeviceCapabilities::default())
-        }
-
-        async fn open_device(&self, _id: &DeviceId) -> HalResult<()> {
-            Err(HalError::NotImplemented)
-        }
-
-        async fn close_device(&self, _id: &DeviceId) -> HalResult<()> {
-            Err(HalError::NotImplemented)
-        }
-
-        async fn read_frame(&self, _id: &DeviceId) -> HalResult<Vec<u8>> {
-            Err(HalError::NotImplemented)
-        }
-
-        async fn list_controls(
-            &self,
-            _id: &DeviceId,
-        ) -> HalResult<Vec<crate::device::ControlCapabilityInfo>> {
-            Ok(vec![])
-        }
-
-        async fn get_control(&self, _id: &DeviceId, _control_id: u32) -> HalResult<i64> {
-            Err(HalError::NotImplemented)
-        }
-
-        async fn set_control(
-            &self,
-            _id: &DeviceId,
-            _control_id: u32,
-            _value: i64,
-        ) -> HalResult<()> {
-            Err(HalError::NotImplemented)
-        }
-    }
 }
