@@ -93,9 +93,14 @@ MJPEG. Enumeration reports all of a camera's modes, not just the uncompressed
 ones.
 
 `cargo test --workspace` is **102 passing, 0 failing, zero build warnings** on
-Ubuntu 26.04. Remaining declared work is in `ROADMAP.md`; the only open item is
-a duplicate Windows Media Foundation backend, which needs a Windows box to
-resolve.
+Ubuntu 26.04, and **91 passing, 0 failing, zero warnings** on Windows 10 — the
+difference is 14 Linux-only tests (the V4L2 backend and its hardware paths)
+against 2 Windows-only ones.
+
+Remaining declared work is in `ROADMAP.md`. The one open item is that **camera
+controls are not implemented on Windows** — `WmfBackend::get_control`/
+`set_control` return an error and `list_controls` is empty, where the Linux V4L2
+side implements them fully. Needs a Windows box.
 
 ## License
 

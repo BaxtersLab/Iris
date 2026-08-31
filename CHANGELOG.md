@@ -4,6 +4,27 @@ All notable changes in this workspace since the previous local snapshot.
 
 Unreleased
 ----------
+Duplicate WMF backend removed — 2026-08-31 (returned from the Windows box)
+- `wmf_backend.rs`'s `WmfUvcBackend` no longer implements `UvcBackend`. Its five
+  `NotImplemented` stubs were **unreachable dead code** — the only use of the
+  type anywhere is `bootstrap.rs` calling the associated function
+  `enumerate_sync`, and `WmfUvcBackend::new()` is never called at all. The impl
+  existed solely to make the type look like a camera backend at a call site,
+  which was the trap; deleting it removes the trap at its root.
+- Neither resolution proposed in the assignment was safe. `backend::WmfBackend`
+  owns thread-scoped COM state (`CoInitializeEx`/`MFStartup` in `new()`,
+  `MFShutdown`/`CoUninitialize` in `Drop`), so routing enumeration through it
+  would `CoUninitialize` a shared tokio worker; and delegating the five methods
+  would have relocated the trap, because that backend's own `get_control` and
+  `set_control` are themselves unimplemented.
+- Verified on Windows 10 Pro 19045 / rustc 1.96.0 against a real camera: build
+  0 warnings, `cargo test --workspace` **91 passed / 0 failed** (the first
+  Windows count recorded for this tree), 91 again with `IRIS_USE_HW=1`, and
+  `IRIS_BACKEND=wmf` showing live 1920x1080 frames. Linux gate unchanged at 102.
+- **Declared, not fixed:** Windows camera controls do not work —
+  `WmfBackend::get_control`/`set_control` return an error and `list_controls`
+  is empty. See `ROADMAP.md`.
+
 UI thread unblocked, config surface made real — 2026-08-31 (Linux workstation)
 - **The preview drain was a livelock, not a perf nit.** `ui_app.rs` looped on
   `try_recv` until `Empty` while converting each frame inline, so once a

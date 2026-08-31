@@ -37,20 +37,62 @@ than left silently incomplete. Format:
 
 ## Windows (WMF) — duplicate backend, opened 2026-08-17
 
-- [ ] STUB: `iris-hal/wmf_backend.rs` — `WmfUvcBackend` has the same **5 `NotImplemented`**
-      methods (`open_device`, `close_device`, `read_frame`, `get_control`, `set_control`) that
-      `v4l2_backend.rs` had until `23b15eb`. **This was not previously declared here**, which
-      Article VII §2–3 requires.
-      **It is not a live capture bug.** There are two WMF implementations and both are in use:
-      `iris_hal::backend::WmfBackend` is fully implemented and is what `bootstrap.rs:276` uses
-      for actual capture; `wmf_backend.rs`'s `WmfUvcBackend` is the enumeration-only mirror of
-      the old V4L2 backend and `bootstrap.rs:74` calls only its `enumerate_sync`. So Windows
-      capture works — but the stubs are `pub` and reachable, and the duplication is a trap for
-      anyone who picks the wrong one.
-      **Resolution is a design decision, not an incidental fix:** either delete
-      `wmf_backend.rs` and route enumeration through `backend::WmfBackend`, or implement its
-      five methods by delegating to the real one. Needs a Windows box to verify either way —
-      this box cannot build or test the WMF path at all.
+- [x] **DONE 2026-08-31 on the Windows box** — ~~STUB: `iris-hal/wmf_backend.rs`~~.
+      Resolved as **neither** stated option, for a reason neither anticipated.
+
+      `backend::WmfBackend` owns **thread-scoped COM state**: `new()` calls
+      `CoInitializeEx` + `MFStartup`, `Drop` calls `MFShutdown` + `CoUninitialize`.
+      That is why `bootstrap.rs` builds it on a dedicated long-lived
+      `wmf-com-keeper` thread. So *"route enumeration through it"* would either
+      construct one per `ListDevices` call on an arbitrary tokio worker and
+      `CoUninitialize` that shared thread on drop, or require plumbing the
+      long-lived instance into the IPC handler — a structural change beyond this
+      item. And *"delegate the five methods"* hits the same COM problem plus a
+      second one: `backend::WmfBackend`'s own `get_control`/`set_control` are
+      **also unimplemented**, so two of the five would have relocated the trap.
+
+      What made a third answer available: the five stubs were **unreachable dead
+      code**. The only use of `WmfUvcBackend` in the workspace is
+      `bootstrap.rs:74` calling the *associated function* `enumerate_sync`;
+      nothing ever obtained one as a `UvcBackend`, and `WmfUvcBackend::new()` is
+      never called at all. The impl existed solely to make the type *look* like a
+      camera backend — the trap itself. **The `impl UvcBackend for WmfUvcBackend`
+      block was deleted and `enumerate_sync` kept.** No COM lifetime touched,
+      `bootstrap.rs` unchanged.
+
+      Verified on Windows 10 Pro 19045 / rustc 1.96.0 / RTX 3060 against the same
+      `32e6:9221` camera: build 0 warnings; `cargo test --workspace` **91 passed,
+      0 failed** — the first Windows count ever recorded for this tree — and 91
+      again under `IRIS_USE_HW=1` with the three WMF tests genuinely exercising
+      the camera; `IRIS_BACKEND=wmf cargo run -p iris-ui` listed the camera and
+      showed live 1920x1080 frames to sequence 2657 with empty stderr.
+      Verified here before integrating: patch applies clean, and the **Linux gate
+      is unchanged at 102 passed / 0 failed / 0 warnings**.
+
+      The module doc now records *why* the type is deliberately not a
+      `UvcBackend`, so the impl does not get re-added. That prose keeps the word
+      `NotImplemented` in the file, which the acceptance grep sees; **kept
+      deliberately** — the explanation is what prevents the regression, and the
+      only *code* occurrence is the enum definition in `error.rs`.
+
+## Windows (WMF) — camera controls, opened 2026-08-31
+
+- [ ] STUB: `iris-hal/backend.rs` — `WmfBackend::get_control` and
+      `WmfBackend::set_control` return
+      `Err(HalError::Io("camera controls not yet implemented for WMF"))`, and
+      `list_controls` returns an empty vec. **So Windows camera controls do not
+      work at all**, and `iris-control`'s capability queries have nothing to read
+      on that platform. The Linux V4L2 side implements these (`G_CTRL`/`S_CTRL`/
+      `QUERYCTRL`, 11 controls enumerated on the reference camera), so this is a
+      genuine platform gap rather than a missing feature everywhere.
+
+      Found by the Windows agent on 2026-08-31 while resolving the duplicate
+      backend above, and **declared rather than fixed** — it was outside that
+      item's scope. It is *not* the same class of defect as the duplicate: these
+      are on the real backend and they fail loudly with a clear message rather
+      than masquerading as an unimplemented trait method.
+
+      Needs a Windows box.
 
 ## GUI memory leak — FOUND AND FIXED (2026-08-01, Linux workstation)
 
