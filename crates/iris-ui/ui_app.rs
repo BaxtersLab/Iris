@@ -8,6 +8,193 @@ use iris_ipc::IpcHandle;
 use iris_ipc::LoggedTelemetryReceiver;
 use std::sync::{Arc, Mutex};
 
+/// Frames taken off the capture channel in a single repaint, at most.
+///
+/// The UI thread must never do work proportional to how far behind it has
+/// fallen. Draining is cheap — a pointer move per frame — so this bound is far
+/// above any real backlog (`max_queue_depth` defaults to 4); it exists so the
+/// loop is *provably* terminating even against a producer that outruns it.
+pub const MAX_DRAIN_PER_REPAINT: usize = 256;
+
+/// What one drain of the capture channel found.
+#[derive(Debug, Default)]
+pub struct DrainOutcome {
+    /// The newest frame available, or `None` if the channel was empty.
+    pub newest: Option<CaptureFrame>,
+    /// How many frames were taken off the channel, including `newest`.
+    pub received: usize,
+    /// The sender is gone.
+    pub disconnected: bool,
+}
+
+/// Take every queued capture frame and keep only the newest.
+///
+/// The preview shows one image, so converting the frames behind it is work
+/// thrown away — and this used to be done inline, converting **each** frame as
+/// it came off the channel, before checking whether another was waiting.
+///
+/// That is not merely wasteful, it can livelock the UI thread. The loop only
+/// ends when `try_recv` returns `Empty`, so if a conversion costs about as much
+/// as the interval between frames the producer refills the channel as fast as
+/// the loop empties it and `update()` never returns to the event loop.
+/// **Measured on 2026-08-31**, debug build, mock backend, 640x480 NV12:
+/// at `target_fps = 2` the UI repainted 647 times in 15 s; at `target_fps = 30`
+/// — the shipped default — it repainted **once**, then pinned a core and drew
+/// nothing further for the rest of the run. The window was frozen, and MJPEG
+/// makes it worse, since each conversion is then a full JPEG decode.
+///
+/// Popping without converting is cheap enough that the drain always outruns the
+/// producer, and [`MAX_DRAIN_PER_REPAINT`] bounds it regardless.
+pub fn drain_to_newest(
+    rx: &mut tokio::sync::mpsc::Receiver<CaptureFrame>,
+) -> DrainOutcome {
+    let mut out = DrainOutcome::default();
+    for _ in 0..MAX_DRAIN_PER_REPAINT {
+        match rx.try_recv() {
+            Ok(frame) => {
+                out.received += 1;
+                out.newest = Some(frame);
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                out.disconnected = true;
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Convert one captured frame to the RGBA8 buffer egui wants for a texture.
+///
+/// Returns an **empty** `Vec` when the frame cannot be converted — an
+/// undersized buffer, or an MJPEG payload that fails to decode or decodes to
+/// different dimensions than the frame reports. Callers must check the length
+/// against `width * height * 4` before uploading; the preview then holds its
+/// previous image rather than rendering garbage.
+pub fn frame_to_rgba(frame: &CaptureFrame) -> Vec<u8> {
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 4);
+            match frame.format {
+                // MJPEG is one compressed JPEG per frame. Decoding
+                // lives in `iris_capture::mjpeg` so the HAL keeps
+                // handing out the untouched compressed stream and
+                // only the preview pays the decode cost.
+                //
+                // On any failure `pixels` is left empty and the
+                // `pixels.len() == w*h*4` guard below skips the
+                // texture update, so the preview holds its previous
+                // frame rather than rendering garbage.
+                iris_hal::device::PixelFormat::Mjpeg => {
+                    match iris_capture::mjpeg::decode_to_rgb24(&frame.data)
+                    {
+                        Ok(d)
+                            if d.width as usize == w
+                                && d.height as usize == h =>
+                        {
+                            pixels =
+                                iris_capture::mjpeg::rgb24_to_rgba8(&d.rgb24);
+                        }
+                        // Decoded fine but disagrees with the
+                        // telemetry geometry — trusting either one
+                        // would index the buffer wrongly.
+                        Ok(d) => {
+                            tracing::warn!(
+                                "MJPEG decoded {}x{} but frame reports {w}x{h}; skipping",
+                                d.width,
+                                d.height
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("MJPEG decode failed: {e}");
+                        }
+                    }
+                }
+                // `chunks_exact(3)` rather than `(0..d.len()).step_by(3)`:
+                // the index form read `d[i + 1]` and `d[i + 2]` unchecked, so a
+                // buffer whose length was not a multiple of 3 — a short read
+                // from hardware, a truncated frame — indexed past the end and
+                // PANICKED on the UI thread. A short buffer must degrade to a
+                // skipped frame, which is what the caller's length check does.
+                // `.take(w * h)` likewise ignores any trailing bytes beyond the
+                // declared geometry instead of overrunning the image.
+                iris_hal::device::PixelFormat::Bgr24 => {
+                    for px in frame.data.chunks_exact(3).take(w * h) {
+                        pixels.push(px[2]);
+                        pixels.push(px[1]);
+                        pixels.push(px[0]);
+                        pixels.push(255);
+                    }
+                }
+                iris_hal::device::PixelFormat::Rgb24 => {
+                    for px in frame.data.chunks_exact(3).take(w * h) {
+                        pixels.push(px[0]);
+                        pixels.push(px[1]);
+                        pixels.push(px[2]);
+                        pixels.push(255);
+                    }
+                }
+                iris_hal::device::PixelFormat::Nv12 => {
+                    // NV12: Y plane (w*h) then interleaved
+                    // UV at half resolution. BT.601.
+                    let d = &frame.data;
+                    if d.len() >= w * h * 3 / 2 {
+                        let uv_base = w * h;
+                        for y in 0..h {
+                            for x in 0..w {
+                                let yv = d[y * w + x] as f32;
+                                let uvi = uv_base
+                                    + (y / 2) * w
+                                    + (x / 2) * 2;
+                                let u = d[uvi] as f32 - 128.0;
+                                let v = d[uvi + 1] as f32 - 128.0;
+                                let c = yv - 16.0;
+                                let r = (1.164 * c + 1.596 * v)
+                                    .clamp(0.0, 255.0);
+                                let g = (1.164 * c - 0.392 * u
+                                    - 0.813 * v)
+                                    .clamp(0.0, 255.0);
+                                let b = (1.164 * c + 2.017 * u)
+                                    .clamp(0.0, 255.0);
+                                pixels.push(r as u8);
+                                pixels.push(g as u8);
+                                pixels.push(b as u8);
+                                pixels.push(255);
+                            }
+                        }
+                    }
+                }
+                iris_hal::device::PixelFormat::Yuyv => {
+                    // YUYV 4:2:2: Y0 U Y1 V per 2 pixels.
+                    let d = &frame.data;
+                    if d.len() >= w * h * 2 {
+                        for i in (0..w * h * 2).step_by(4) {
+                            let y0 = d[i] as f32;
+                            let u = d[i + 1] as f32 - 128.0;
+                            let y1 = d[i + 2] as f32;
+                            let v = d[i + 3] as f32 - 128.0;
+                            for yv in [y0, y1] {
+                                let c = yv - 16.0;
+                                let r = (1.164 * c + 1.596 * v)
+                                    .clamp(0.0, 255.0);
+                                let g = (1.164 * c - 0.392 * u
+                                    - 0.813 * v)
+                                    .clamp(0.0, 255.0);
+                                let b = (1.164 * c + 2.017 * u)
+                                    .clamp(0.0, 255.0);
+                                pixels.push(r as u8);
+                                pixels.push(g as u8);
+                                pixels.push(b as u8);
+                                pixels.push(255);
+                            }
+                        }
+                    }
+                }
+            }
+    pixels
+}
+
 pub struct IrisApp {
     ipc: Arc<IpcHandle>,
     telemetry_rx: Mutex<LoggedTelemetryReceiver>,
@@ -27,6 +214,15 @@ pub struct IrisApp {
     // (thumbnail fields removed; preview-only)
     // Last time cameras were scanned and result summary
     last_scan_summary: Arc<Mutex<String>>,
+    // Preview drain accounting. `frames_received` counts every frame taken off
+    // the capture channel; `frames_converted` counts the ones actually turned
+    // into an RGBA texture. They are equal only if the UI converts every frame
+    // it receives, so the pair is the direct measurement of the drain policy.
+    frames_received: u64,
+    frames_converted: u64,
+    // Wall clock of the last drain-stats line, so the report is periodic rather
+    // than per-repaint.
+    perf_last_report: Option<std::time::Instant>,
 }
 
 impl IrisApp {
@@ -45,6 +241,9 @@ impl IrisApp {
             did_set_window_size: false,
             is_capturing: false,
             last_scan_summary: Arc::new(Mutex::new("Not scanned yet".to_string())),
+            frames_received: 0,
+            frames_converted: 0,
+            perf_last_report: None,
         };
 
         // fetch initial device list and auto-select the first device if present
@@ -86,6 +285,72 @@ impl IrisApp {
         });
 
         app
+    }
+}
+
+impl IrisApp {
+    /// Keep the window repainting while there is something live to show.
+    ///
+    /// egui is an immediate-mode GUI with a **reactive** run loop: eframe calls
+    /// `update()` in response to input and window events, and otherwise sleeps.
+    /// Nothing in this app asked it to do otherwise, so the camera preview only
+    /// advanced while the pointer or keyboard was generating events over the
+    /// window — leave it alone, or put another window in front of it, and the
+    /// preview froze on whatever frame happened to be last while capture kept
+    /// running behind it. Measured on 2026-08-31: an unfocused Iris window took
+    /// **zero** frames off `capture_rx` across a 30 s run in which the capture
+    /// service produced 869 frames.
+    ///
+    /// A live video preview has to drive its own clock. ~60 Hz comfortably
+    /// outpaces any camera rate Iris configures (`IrisConfig::validate` caps
+    /// `target_fps` at 240, but real UVC hardware here tops out at 30), so the
+    /// preview never trails the source for want of a repaint.
+    ///
+    /// When capture is not running there is still a telemetry log ticking, so
+    /// idle at 4 Hz rather than stopping: enough to keep the log live, cheap
+    /// enough not to spin a core on an idle desktop.
+    fn drive_repaints(&self, ctx: &egui::Context) {
+        const PREVIEW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+        const IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+        ctx.request_repaint_after(if self.capture_rx.is_some() {
+            PREVIEW_INTERVAL
+        } else {
+            IDLE_INTERVAL
+        });
+    }
+
+    /// Emit the preview-drain accounting once every 5 s.
+    ///
+    /// `received` is frames taken off the capture channel; `converted` is
+    /// frames actually turned into a texture. `converted / received` is the
+    /// share of the per-frame conversion cost (for MJPEG, a full JPEG decode)
+    /// the UI actually pays. Reported rather than asserted, because the ratio
+    /// depends on how far the repaint rate trails the capture rate.
+    fn report_drain_stats(&mut self) {
+        const REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        match self.perf_last_report {
+            Some(last) if now.duration_since(last) < REPORT_EVERY => return,
+            _ => self.perf_last_report = Some(now),
+        }
+        // Deliberately reported even when `received` is 0. A preview that is
+        // taking no frames at all is the single most useful thing this line can
+        // say, and an early return on zero is exactly what hid it: the app
+        // looked healthy because the only evidence of the stall was silence.
+        let skipped = self.frames_received.saturating_sub(self.frames_converted);
+        let pct = if self.frames_received == 0 {
+            0.0
+        } else {
+            (self.frames_converted as f64 / self.frames_received as f64) * 100.0
+        };
+        let line = format!(
+            "[Drain] received={} converted={} skipped={} ({pct:.1}% of frames converted)",
+            self.frames_received, self.frames_converted, skipped,
+        );
+        println!("{line}");
+        if let Ok(mut lg) = self.log.lock() {
+            lg.push(line);
+        }
     }
 }
 
@@ -309,187 +574,69 @@ impl eframe::App for IrisApp {
                     ui.heading("Preview");
                     // Drain any available capture frames and update preview texture
                     if let Some(rx) = &mut self.capture_rx {
-                        loop {
-                            match rx.try_recv() {
-                                Ok(frame) => {
-                                    // On successful frame, clear any pending deadline
-                                    self.capture_rx_deadline = None;
+                        // Drain first, convert once. See `drain_to_newest`.
+                        let drained = crate::ui_app::drain_to_newest(rx);
+                        self.frames_received += drained.received as u64;
 
-                                    // convert BGR24 or other formats to RGBA
-                                    let w = frame.width as usize;
-                                    let h = frame.height as usize;
-                                    let mut pixels: Vec<u8> = Vec::with_capacity(w * h * 4);
-                                    match frame.format {
-                                        // MJPEG is one compressed JPEG per frame. Decoding
-                                        // lives in `iris_capture::mjpeg` so the HAL keeps
-                                        // handing out the untouched compressed stream and
-                                        // only the preview pays the decode cost.
-                                        //
-                                        // On any failure `pixels` is left empty and the
-                                        // `pixels.len() == w*h*4` guard below skips the
-                                        // texture update, so the preview holds its previous
-                                        // frame rather than rendering garbage.
-                                        iris_hal::device::PixelFormat::Mjpeg => {
-                                            match iris_capture::mjpeg::decode_to_rgb24(&frame.data)
-                                            {
-                                                Ok(d)
-                                                    if d.width as usize == w
-                                                        && d.height as usize == h =>
-                                                {
-                                                    pixels =
-                                                        iris_capture::mjpeg::rgb24_to_rgba8(&d.rgb24);
-                                                }
-                                                // Decoded fine but disagrees with the
-                                                // telemetry geometry — trusting either one
-                                                // would index the buffer wrongly.
-                                                Ok(d) => {
-                                                    tracing::warn!(
-                                                        "MJPEG decoded {}x{} but frame reports {w}x{h}; skipping",
-                                                        d.width,
-                                                        d.height
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!("MJPEG decode failed: {e}");
-                                                }
-                                            }
-                                        }
-                                        iris_hal::device::PixelFormat::Bgr24 => {
-                                            let d = frame.data;
-                                            for i in (0..d.len()).step_by(3) {
-                                                let b = d[i];
-                                                let g = d[i + 1];
-                                                let r = d[i + 2];
-                                                pixels.push(r);
-                                                pixels.push(g);
-                                                pixels.push(b);
-                                                pixels.push(255);
-                                            }
-                                        }
-                                        iris_hal::device::PixelFormat::Rgb24 => {
-                                            let d = frame.data;
-                                            for i in (0..d.len()).step_by(3) {
-                                                let r = d[i];
-                                                let g = d[i + 1];
-                                                let b = d[i + 2];
-                                                pixels.push(r);
-                                                pixels.push(g);
-                                                pixels.push(b);
-                                                pixels.push(255);
-                                            }
-                                        }
-                                        iris_hal::device::PixelFormat::Nv12 => {
-                                            // NV12: Y plane (w*h) then interleaved
-                                            // UV at half resolution. BT.601.
-                                            let d = &frame.data;
-                                            if d.len() >= w * h * 3 / 2 {
-                                                let uv_base = w * h;
-                                                for y in 0..h {
-                                                    for x in 0..w {
-                                                        let yv = d[y * w + x] as f32;
-                                                        let uvi = uv_base
-                                                            + (y / 2) * w
-                                                            + (x / 2) * 2;
-                                                        let u = d[uvi] as f32 - 128.0;
-                                                        let v = d[uvi + 1] as f32 - 128.0;
-                                                        let c = yv - 16.0;
-                                                        let r = (1.164 * c + 1.596 * v)
-                                                            .clamp(0.0, 255.0);
-                                                        let g = (1.164 * c - 0.392 * u
-                                                            - 0.813 * v)
-                                                            .clamp(0.0, 255.0);
-                                                        let b = (1.164 * c + 2.017 * u)
-                                                            .clamp(0.0, 255.0);
-                                                        pixels.push(r as u8);
-                                                        pixels.push(g as u8);
-                                                        pixels.push(b as u8);
-                                                        pixels.push(255);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        iris_hal::device::PixelFormat::Yuyv => {
-                                            // YUYV 4:2:2: Y0 U Y1 V per 2 pixels.
-                                            let d = &frame.data;
-                                            if d.len() >= w * h * 2 {
-                                                for i in (0..w * h * 2).step_by(4) {
-                                                    let y0 = d[i] as f32;
-                                                    let u = d[i + 1] as f32 - 128.0;
-                                                    let y1 = d[i + 2] as f32;
-                                                    let v = d[i + 3] as f32 - 128.0;
-                                                    for yv in [y0, y1] {
-                                                        let c = yv - 16.0;
-                                                        let r = (1.164 * c + 1.596 * v)
-                                                            .clamp(0.0, 255.0);
-                                                        let g = (1.164 * c - 0.392 * u
-                                                            - 0.813 * v)
-                                                            .clamp(0.0, 255.0);
-                                                        let b = (1.164 * c + 2.017 * u)
-                                                            .clamp(0.0, 255.0);
-                                                        pixels.push(r as u8);
-                                                        pixels.push(g as u8);
-                                                        pixels.push(b as u8);
-                                                        pixels.push(255);
-                                                    }
-                                                }
-                                            }
-                                        }
+                        if drained.received > 0 {
+                            // A frame arrived, so any pending close is stale.
+                            self.capture_rx_deadline = None;
+                        }
+
+                        if let Some(frame) = drained.newest {
+                            let w = frame.width as usize;
+                            let h = frame.height as usize;
+                            let pixels = frame_to_rgba(&frame);
+                            if pixels.len() == w * h * 4 {
+                                self.frames_converted += 1;
+                                let image = ColorImage::from_rgba_unmultiplied([w, h], &pixels);
+                                // Replace the EXISTING texture's contents in place.
+                                //
+                                // This used to call `ctx.load_texture(...)` every frame,
+                                // which ALLOCATES A NEW TEXTURE each time — it does not
+                                // replace, despite the old comment saying so. Overwriting
+                                // `self.preview_texture` did not free the previous one, so
+                                // the app leaked one full RGBA image (width*height*4) per
+                                // captured frame: ~27 MB/s at 30 fps, 788 MB -> 4.8 GB in
+                                // under a minute. Confirmed with heaptrack: 584.91 MB
+                                // leaked over 476 calls from this exact line, = 1.23 MB
+                                // each = 640*480*4 exactly. `TextureHandle::set` reuses
+                                // the allocation instead.
+                                match &mut self.preview_texture {
+                                    Some(tex) => {
+                                        tex.set(image, egui::TextureOptions::LINEAR);
                                     }
-
-                                    if pixels.len() == w * h * 4 {
-                                        let image = ColorImage::from_rgba_unmultiplied(
-                                            [frame.width as usize, frame.height as usize],
-                                            &pixels,
-                                        );
-                                        // Replace the EXISTING texture's contents in place.
-                                        //
-                                        // This used to call `ctx.load_texture(...)` every frame,
-                                        // which ALLOCATES A NEW TEXTURE each time — it does not
-                                        // replace, despite the old comment saying so. Overwriting
-                                        // `self.preview_texture` did not free the previous one, so
-                                        // the app leaked one full RGBA image (width*height*4) per
-                                        // captured frame: ~27 MB/s at 30 fps, 788 MB -> 4.8 GB in
-                                        // under a minute. Confirmed with heaptrack: 584.91 MB
-                                        // leaked over 476 calls from this exact line, = 1.23 MB
-                                        // each = 640*480*4 exactly. `TextureHandle::set` reuses
-                                        // the allocation instead.
-                                        match &mut self.preview_texture {
-                                            Some(tex) => {
-                                                tex.set(image, egui::TextureOptions::LINEAR);
-                                            }
-                                            None => {
-                                                self.preview_texture = Some(ctx.load_texture(
-                                                    "iris_preview",
-                                                    image,
-                                                    egui::TextureOptions::LINEAR,
-                                                ));
-                                            }
-                                        }
-                                        if let Ok(mut lf) = self.last_frame_info.lock() {
-                                            *lf = Some((frame.width, frame.height));
-                                        }
-
-                                        // (thumbnail generation removed) keep only the main preview texture
+                                    None => {
+                                        self.preview_texture = Some(ctx.load_texture(
+                                            "iris_preview",
+                                            image,
+                                            egui::TextureOptions::LINEAR,
+                                        ));
                                     }
                                 }
-                                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                                    // Start a short grace period before dropping the receiver
-                                    if self.capture_rx_deadline.is_none() {
-                                        self.capture_rx_deadline =
-                                            Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
-                                        println!("IrisApp: capture_rx closed; will drop receiver after 1s unless recovered");
-                                    } else if let Some(d) = self.capture_rx_deadline {
-                                        if std::time::Instant::now() >= d {
-                                            println!("IrisApp: dropping closed capture_rx after grace period");
-                                            self.capture_rx = None;
-                                            self.capture_rx_deadline = None;
-                                        }
-                                    }
-                                    break;
+                                if let Ok(mut lf) = self.last_frame_info.lock() {
+                                    *lf = Some((frame.width, frame.height));
                                 }
                             }
                         }
+
+                        if drained.disconnected {
+                            // Start a short grace period before dropping the receiver
+                            if self.capture_rx_deadline.is_none() {
+                                self.capture_rx_deadline = Some(
+                                    std::time::Instant::now() + std::time::Duration::from_secs(1),
+                                );
+                                println!("IrisApp: capture_rx closed; will drop receiver after 1s unless recovered");
+                            } else if let Some(d) = self.capture_rx_deadline {
+                                if std::time::Instant::now() >= d {
+                                    println!("IrisApp: dropping closed capture_rx after grace period");
+                                    self.capture_rx = None;
+                                    self.capture_rx_deadline = None;
+                                }
+                            }
+                        }
+
+                        self.report_drain_stats();
                     }
 
                     if let Some(tex) = &self.preview_texture {
@@ -570,5 +717,201 @@ impl eframe::App for IrisApp {
                 });
             }
         });
+
+        self.drive_repaints(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iris_hal::device::PixelFormat;
+    use tokio::sync::mpsc;
+
+    /// The same 16x16 baseline JPEG `iris-capture` decodes against, referenced
+    /// rather than copied so the two crates cannot drift onto different bytes.
+    const TINY_JPEG: &[u8] = include_bytes!("../iris-capture/tests/fixtures/tiny16.jpg");
+
+    fn frame(seq: u64, w: u32, h: u32, format: PixelFormat, data: Vec<u8>) -> CaptureFrame {
+        CaptureFrame {
+            sequence: seq,
+            width: w,
+            height: h,
+            format,
+            data,
+            timestamp_us: 0,
+            is_cropped: false,
+        }
+    }
+
+    fn blank(seq: u64) -> CaptureFrame {
+        frame(seq, 1, 1, PixelFormat::Rgb24, vec![0, 0, 0])
+    }
+
+    // ---- drain_to_newest -------------------------------------------------
+
+    #[test]
+    fn drain_reports_nothing_on_an_empty_channel() {
+        let (_tx, mut rx) = mpsc::channel::<CaptureFrame>(4);
+        let out = drain_to_newest(&mut rx);
+        assert!(out.newest.is_none());
+        assert_eq!(out.received, 0);
+        assert!(!out.disconnected);
+    }
+
+    #[test]
+    fn drain_passes_a_single_frame_straight_through() {
+        let (tx, mut rx) = mpsc::channel::<CaptureFrame>(4);
+        tx.try_send(blank(7)).unwrap();
+        let out = drain_to_newest(&mut rx);
+        assert_eq!(out.received, 1);
+        assert_eq!(out.newest.expect("frame").sequence, 7);
+    }
+
+    /// The point of the change: a backlog costs one conversion, not one per
+    /// queued frame. `received` counts what came off the channel, and exactly
+    /// one frame — the last — survives to be converted.
+    #[test]
+    fn drain_keeps_only_the_newest_of_a_backlog() {
+        let (tx, mut rx) = mpsc::channel::<CaptureFrame>(16);
+        for seq in 1..=10 {
+            tx.try_send(blank(seq)).unwrap();
+        }
+        let out = drain_to_newest(&mut rx);
+        assert_eq!(out.received, 10, "all ten must be taken off the channel");
+        assert_eq!(
+            out.newest.expect("frame").sequence,
+            10,
+            "the newest frame is the one kept"
+        );
+        assert_eq!(rx.try_recv().is_err(), true, "channel must be left empty");
+    }
+
+    /// REGRESSION — the livelock.
+    ///
+    /// The old drain looped until `try_recv` returned `Empty` while converting
+    /// each frame inline, so a producer that refilled the channel as fast as
+    /// the loop emptied it kept the UI thread inside `update()` forever: 30 s
+    /// at 640x480 NV12 @30 fps produced exactly **one** repaint. The invariant
+    /// that prevents it is that one drain does a bounded amount of work and
+    /// returns to the event loop regardless of how far behind the UI is.
+    #[test]
+    fn drain_is_bounded_and_always_returns() {
+        let over = MAX_DRAIN_PER_REPAINT + 50;
+        let (tx, mut rx) = mpsc::channel::<CaptureFrame>(over);
+        for seq in 0..over {
+            tx.try_send(blank(seq as u64)).unwrap();
+        }
+        let out = drain_to_newest(&mut rx);
+        assert_eq!(
+            out.received, MAX_DRAIN_PER_REPAINT,
+            "one repaint must take at most MAX_DRAIN_PER_REPAINT frames"
+        );
+        assert!(!out.disconnected, "a full channel is not a disconnect");
+        // The rest stay queued for the next repaint rather than holding the
+        // UI thread until the producer happens to pause.
+        assert_eq!(out.newest.expect("frame").sequence, MAX_DRAIN_PER_REPAINT as u64 - 1);
+    }
+
+    #[test]
+    fn drain_flags_a_dropped_sender() {
+        let (tx, mut rx) = mpsc::channel::<CaptureFrame>(4);
+        tx.try_send(blank(1)).unwrap();
+        drop(tx);
+        let out = drain_to_newest(&mut rx);
+        assert_eq!(out.received, 1, "queued frames are still delivered");
+        assert!(out.disconnected, "the closed sender must be reported");
+    }
+
+    // ---- frame_to_rgba ---------------------------------------------------
+
+    #[test]
+    fn rgb24_gains_an_opaque_alpha_in_place() {
+        let f = frame(0, 2, 1, PixelFormat::Rgb24, vec![10, 20, 30, 40, 50, 60]);
+        assert_eq!(
+            frame_to_rgba(&f),
+            vec![10, 20, 30, 255, 40, 50, 60, 255]
+        );
+    }
+
+    #[test]
+    fn bgr24_is_channel_swapped() {
+        let f = frame(0, 1, 1, PixelFormat::Bgr24, vec![30, 20, 10]);
+        assert_eq!(frame_to_rgba(&f), vec![10, 20, 30, 255], "B,G,R -> R,G,B,A");
+    }
+
+    /// The old index-stepping form read `d[i + 1]` unchecked. A buffer whose
+    /// length is not a multiple of 3 panicked the UI thread; it must now come
+    /// back short so the caller skips the frame.
+    #[test]
+    fn a_ragged_rgb_buffer_does_not_panic() {
+        let f = frame(0, 2, 1, PixelFormat::Rgb24, vec![1, 2, 3, 4]);
+        let px = frame_to_rgba(&f);
+        assert_ne!(px.len(), 2 * 1 * 4, "must not be accepted as a full frame");
+        assert_eq!(px, vec![1, 2, 3, 255], "the one whole pixel converts");
+    }
+
+    #[test]
+    fn an_undersized_nv12_buffer_converts_to_nothing() {
+        // 2x2 NV12 needs 6 bytes; give it 5.
+        let f = frame(0, 2, 2, PixelFormat::Nv12, vec![16; 5]);
+        assert!(frame_to_rgba(&f).is_empty());
+    }
+
+    #[test]
+    fn an_undersized_yuyv_buffer_converts_to_nothing() {
+        // 2x1 YUYV needs 4 bytes; give it 3.
+        let f = frame(0, 2, 1, PixelFormat::Yuyv, vec![16; 3]);
+        assert!(frame_to_rgba(&f).is_empty());
+    }
+
+    /// BT.601 limited range: Y=16 is black, Y=235 is white, U=V=128 is neutral.
+    /// Chosen because the answers are known independently of the code.
+    #[test]
+    fn yuyv_maps_limited_range_luma_to_black_and_white() {
+        let f = frame(0, 2, 1, PixelFormat::Yuyv, vec![16, 128, 235, 128]);
+        let px = frame_to_rgba(&f);
+        assert_eq!(px.len(), 8);
+        assert_eq!(&px[0..4], &[0, 0, 0, 255], "Y=16 neutral chroma is black");
+        assert_eq!(&px[4..8], &[254, 254, 254, 255], "Y=235 neutral chroma is white");
+    }
+
+    #[test]
+    fn nv12_maps_limited_range_luma_to_black() {
+        // 2x2: four Y samples then one interleaved UV pair.
+        let f = frame(0, 2, 2, PixelFormat::Nv12, vec![16, 16, 16, 16, 128, 128]);
+        let px = frame_to_rgba(&f);
+        assert_eq!(px.len(), 2 * 2 * 4);
+        assert!(px.chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn mjpeg_decodes_to_a_full_rgba_image() {
+        let f = frame(0, 16, 16, PixelFormat::Mjpeg, TINY_JPEG.to_vec());
+        let px = frame_to_rgba(&f);
+        assert_eq!(px.len(), 16 * 16 * 4, "a decoded MJPEG frame is complete");
+        let first = px[0];
+        assert!(
+            px.iter().any(|&b| b != first),
+            "a uniform buffer means the decode produced nothing real"
+        );
+    }
+
+    /// Decoding fine but disagreeing with the telemetry geometry is the case
+    /// that would index the buffer wrongly, so it is refused rather than
+    /// stretched to fit.
+    #[test]
+    fn mjpeg_that_disagrees_with_the_frame_geometry_is_refused() {
+        let f = frame(0, 32, 32, PixelFormat::Mjpeg, TINY_JPEG.to_vec());
+        assert!(
+            frame_to_rgba(&f).is_empty(),
+            "16x16 JPEG in a frame declaring 32x32 must not be converted"
+        );
+    }
+
+    #[test]
+    fn undecodable_mjpeg_converts_to_nothing() {
+        let f = frame(0, 16, 16, PixelFormat::Mjpeg, vec![0xFF, 0xD8, 0x00, 0x01]);
+        assert!(frame_to_rgba(&f).is_empty());
     }
 }
