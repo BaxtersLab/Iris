@@ -1,4 +1,11 @@
 /target
+
+# The ROOT Cargo.lock IS committed (see the 2026-08-31 build: commit) so a clone
+# builds what was tested. This one is deliberately not: iris-ipc-pipe-bridge is
+# a STANDALONE crate, not a workspace member, so `cargo build --workspace` never
+# touches it and no gate here has ever resolved or built its lock. Committing a
+# lock nothing verifies would publish a pin no one has stood behind.
+/crates/iris-ipc-pipe-bridge/Cargo.lock
 *.log
 *.tmp
 .vscode/
