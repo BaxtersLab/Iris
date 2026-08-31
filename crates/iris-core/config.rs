@@ -2,6 +2,15 @@ use crate::error::{IrisError, IrisResult};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// The `capture.pixel_format` values `validate` accepts.
+///
+/// Every name here must parse via `iris_hal::device::PixelFormat::from_config_name`,
+/// which a test in `iris-hal` asserts — the two lists used to be unrelated,
+/// because nothing parsed the field at all. `yuy2` is kept as the Windows
+/// spelling of `yuyv`; `bgra8` was removed because no Iris backend produces it.
+pub const ALLOWED_PIXEL_FORMATS: &[&str] =
+    &["rgb24", "bgr24", "nv12", "yuyv", "yuy2", "mjpeg"];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct IrisConfig {
     pub device: DeviceConfig,
@@ -194,8 +203,7 @@ impl IrisConfig {
         if !(1..=240).contains(&self.capture.target_fps) {
             return Err(IrisError::Config("target_fps out of range".to_string()));
         }
-        let allowed_pix = ["nv12", "yuy2", "mjpeg", "bgra8"];
-        if !allowed_pix.contains(&self.capture.pixel_format.as_str()) {
+        if !ALLOWED_PIXEL_FORMATS.contains(&self.capture.pixel_format.as_str()) {
             return Err(IrisError::Config("pixel_format invalid".to_string()));
         }
         if self.capture.max_queue_depth < 1 {

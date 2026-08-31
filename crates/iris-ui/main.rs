@@ -19,6 +19,20 @@ async fn main() {
             iris_core::config::IrisConfig::default()
         }
     };
+
+    // Validate what was loaded. `IrisConfig::validate()` has existed since the
+    // first Iris config and had **no caller outside its own tests** — a file
+    // with a 99999-pixel width, an unknown drop policy or a nonsense log level
+    // was accepted in full and surfaced later as strange behaviour rather than
+    // an error. A bad file falls back to defaults instead of refusing to start,
+    // matching how a parse failure above is handled.
+    let cfg = match cfg.validate() {
+        Ok(()) => cfg,
+        Err(e) => {
+            eprintln!("config invalid ({e}); falling back to defaults");
+            iris_core::config::IrisConfig::default()
+        }
+    };
     match iris_ui::bootstrap::IrisRuntime::bootstrap(cfg).await {
         Ok(_rt) => {
             // Keep runtime alive while UI runs; pass the IPC handle into the UI so it can send commands and subscribe to telemetry.

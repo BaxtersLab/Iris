@@ -50,6 +50,38 @@ impl PixelFormat {
     pub fn is_raw(&self) -> bool {
         !matches!(self, PixelFormat::Mjpeg)
     }
+
+    /// Parse the `capture.pixel_format` string from `iris.toml`.
+    ///
+    /// Case-insensitive, and `yuy2` is accepted as the Windows spelling of the
+    /// same 4:2:2 layout `yuyv` names on Linux — the two are the same fourcc.
+    ///
+    /// The names `IrisConfig::validate` accepts and the names this parses are
+    /// held together by a test in this crate; before 2026-08-31 nothing parsed
+    /// this field at all, so the config list had drifted to include `bgra8`
+    /// (which no Iris backend has ever produced) while omitting `rgb24` and
+    /// `bgr24`, one of which was what capture actually ran.
+    pub fn from_config_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "rgb24" => Some(PixelFormat::Rgb24),
+            "bgr24" => Some(PixelFormat::Bgr24),
+            "nv12" => Some(PixelFormat::Nv12),
+            "yuyv" | "yuy2" => Some(PixelFormat::Yuyv),
+            "mjpeg" | "mjpg" => Some(PixelFormat::Mjpeg),
+            _ => None,
+        }
+    }
+
+    /// The canonical `iris.toml` spelling of this format.
+    pub fn config_name(&self) -> &'static str {
+        match self {
+            PixelFormat::Rgb24 => "rgb24",
+            PixelFormat::Bgr24 => "bgr24",
+            PixelFormat::Nv12 => "nv12",
+            PixelFormat::Yuyv => "yuyv",
+            PixelFormat::Mjpeg => "mjpeg",
+        }
+    }
 }
 
 impl fmt::Display for PixelFormat {

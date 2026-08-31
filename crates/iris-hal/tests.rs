@@ -378,3 +378,66 @@ mod tests {
         );
     }
 }
+
+/// `capture.pixel_format` in `iris.toml` was a dead string until 2026-08-31:
+/// `bootstrap.rs` hardcoded `PixelFormat::Bgr24` and never read it. These pin
+/// the parser that now routes it, and — the part that matters — pin the two
+/// lists to each other, since they live in different crates and previously had
+/// no relationship at all.
+#[cfg(test)]
+mod pixel_format_config_names {
+    use crate::device::PixelFormat;
+
+    #[test]
+    fn every_name_validate_accepts_can_actually_be_parsed() {
+        for name in iris_core::config::ALLOWED_PIXEL_FORMATS {
+            assert!(
+                PixelFormat::from_config_name(name).is_some(),
+                "IrisConfig::validate accepts '{name}' but nothing can parse it \
+                 — a config that passes validation would then be discarded"
+            );
+        }
+    }
+
+    #[test]
+    fn every_canonical_name_round_trips() {
+        for f in [
+            PixelFormat::Rgb24,
+            PixelFormat::Bgr24,
+            PixelFormat::Nv12,
+            PixelFormat::Yuyv,
+            PixelFormat::Mjpeg,
+        ] {
+            let name = f.config_name();
+            assert_eq!(PixelFormat::from_config_name(name), Some(f.clone()));
+            assert!(
+                iris_core::config::ALLOWED_PIXEL_FORMATS.contains(&name),
+                "'{name}' parses but IrisConfig::validate would reject it"
+            );
+        }
+    }
+
+    #[test]
+    fn yuy2_is_accepted_as_the_windows_spelling_of_yuyv() {
+        assert_eq!(
+            PixelFormat::from_config_name("yuy2"),
+            Some(PixelFormat::Yuyv)
+        );
+    }
+
+    #[test]
+    fn parsing_is_case_insensitive() {
+        assert_eq!(PixelFormat::from_config_name("NV12"), Some(PixelFormat::Nv12));
+        assert_eq!(PixelFormat::from_config_name("MJPEG"), Some(PixelFormat::Mjpeg));
+    }
+
+    /// `bgra8` was in the old allowed list. No Iris backend has ever produced
+    /// it, and it is 4 bytes per pixel where the nearest variant is 3, so
+    /// mapping it to `Bgr24` would mis-size every frame. It must be refused.
+    #[test]
+    fn unknown_and_unsupported_names_are_refused() {
+        assert_eq!(PixelFormat::from_config_name("bgra8"), None);
+        assert_eq!(PixelFormat::from_config_name(""), None);
+        assert_eq!(PixelFormat::from_config_name("rgb32"), None);
+    }
+}

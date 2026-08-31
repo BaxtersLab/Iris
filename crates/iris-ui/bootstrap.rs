@@ -227,15 +227,52 @@ impl IrisRuntime {
         let hrt_config = HrtConfig::default();
         let (hrt_service, _hrt_handle) = HrtService::new(hrt_config, telemetry_tx.clone());
 
-        // 4. Mock HAL backend and capture service
-        // Pixel format: use available formats from `iris-hal::device::PixelFormat`
+        // 4. HAL backend and capture service
+        //
+        // `format` and `drop_policy` are read from `iris.toml`. They used to be
+        // hardcoded here — `PixelFormat::Bgr24` and `DropPolicy::Oldest` — while
+        // `capture.pixel_format` and `capture.drop_policy` sat in the config
+        // struct, were serialised, were range-checked by `IrisConfig::validate`,
+        // and were then thrown away. Same shape as the 2026-08-01 finding that
+        // `IrisConfig::load()` itself was never called: a configurable mechanism
+        // that exists and is not routed through (Article XI §3).
+        //
+        // Both parse failures fall back to the previous hardcoded value rather
+        // than refusing to start, because `main` validates the config first and
+        // will already have reported an unusable value.
+        let capture_format = iris_hal::device::PixelFormat::from_config_name(
+            &config.capture.pixel_format,
+        )
+        .unwrap_or_else(|| {
+            eprintln!(
+                "capture.pixel_format '{}' not recognised; using bgr24",
+                config.capture.pixel_format
+            );
+            iris_hal::device::PixelFormat::Bgr24
+        });
+        let drop_policy: DropPolicy = config.capture.drop_policy.parse().unwrap_or_else(|_| {
+            eprintln!(
+                "capture.drop_policy '{}' not recognised; using oldest",
+                config.capture.drop_policy
+            );
+            DropPolicy::Oldest
+        });
+        println!(
+            "Capture config: {}x{} @{} fps format={} drop_policy={:?} queue_depth={}",
+            config.capture.width,
+            config.capture.height,
+            config.capture.target_fps,
+            capture_format.config_name(),
+            drop_policy,
+            config.capture.max_queue_depth,
+        );
         let capture_cfg = CaptureConfig {
             width: config.capture.width,
             height: config.capture.height,
             target_fps: config.capture.target_fps,
-            format: iris_hal::device::PixelFormat::Bgr24,
+            format: capture_format,
             max_queue_depth: config.capture.max_queue_depth,
-            drop_policy: DropPolicy::Oldest,
+            drop_policy,
             roi: None,
         };
         // Select capture backend at runtime. Use `IRIS_BACKEND=dxgi` to force DXGI on Windows,
