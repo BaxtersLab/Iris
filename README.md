@@ -85,8 +85,9 @@ glibc — and it reports which `iris.toml` was picked up:
 Running the binary directly works too, and is what `run.sh` ends up doing:
 
 ```sh
-cargo run -p iris-ui                     # mock backend (default)
-IRIS_BACKEND=wmf  cargo run -p iris-ui   # real camera via Windows Media Foundation
+cargo run -p iris-ui                     # the camera, if one is present
+IRIS_BACKEND=mock cargo run -p iris-ui   # force the synthetic test image
+IRIS_BACKEND=wmf  cargo run -p iris-ui   # force Windows Media Foundation (now the default there)
 IRIS_BACKEND=v4l2 cargo run -p iris-ui   # Linux V4L2 (enumeration/probe today)
 IRIS_BACKEND=dxgi cargo run -p iris-ui   # Windows screen capture
 IRIS_UI_HEADLESS=1 ...                   # scripted headless run (no window)

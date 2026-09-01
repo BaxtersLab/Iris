@@ -13,8 +13,37 @@ the upgrade, so a published build would never reach anyone who already had one.
 `build_deb.sh` now refuses to build when the package version and the `iris-ui`
 crate version disagree.
 
-Unreleased
-----------
+0.2.1 — 2026-09-01
+------------------
+Round 5 — the agent could not see on Windows
+- **`GET /frame` had never worked on Windows.** Media Foundation decodes a
+  camera's MJPEG itself and reports NV12; `snapshot.rs` handled MJPEG, RGB24 and
+  BGR24 and sent everything else to a catch-all, so the endpoint answered
+  `500 {"error":"snapshot failed: cannot decode Nv12 frames to pixels"}` to every
+  request, on every Windows machine, for every camera. The preview window looked
+  perfect throughout, because `iris-ui` has its own NV12 conversion — the window
+  could see and the agent could not. Found and fixed on the Windows box (round 5).
+- **YUYV had the identical hole** and is now closed too, before a camera found
+  it. V4L2 offers YUYV widely, so this was a live Linux exposure, not a
+  hypothetical; the conversion is pure, so constructed buffers prove it without
+  YUYV hardware.
+- **The catch-all is gone.** All five `PixelFormat` variants are handled and the
+  match is exhaustive, so a sixth format cannot compile until `/frame` decodes
+  it. Both outages above existed because "nobody wrote this yet" was a runtime
+  answer instead of a build failure. `SnapshotError::UnsupportedFormat` is
+  removed with it — nothing constructs it any more.
+- All three conversions (NV12, YUYV, and the preview's) use the same BT.601
+  limited-range coefficients on purpose. If one changes, change all three.
+- **Windows no longer defaults to a synthetic grey image.** The Linux fix landed
+  as `cfg(not(target_os = "linux"))`, which left Windows on the mock; a normal
+  desktop launch there enumerated the camera and then announced "no default
+  camera backend on this platform" on the very next line. `IRIS_BACKEND=mock`
+  remains as an explicit opt-in.
+- **The Windows single-instance tests were flaky, at 12 failures in 20 runs.**
+  Both took the live product mutex name, so they raced each other, failed
+  outright whenever Iris was running, and briefly held the real lock — a genuine
+  launch during a test run could be refused. The name is now a parameter.
+
 An agent can see — 2026-09-01
 - **`GET /frame`** on the existing metrics listener returns the newest camera
   frame as a downscaled JPEG in a complete `data:image/jpeg;base64,...` URL,

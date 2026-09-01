@@ -74,6 +74,23 @@ Every successful answer carries **`age_ms`** — how old the frame was when it w
 served, computed here so no caller has to reason about clock skew. `captured_us`
 is the absolute capture time if you want it.
 
+### Pixel formats — every format the camera can deliver
+
+`/frame` decodes **MJPEG, NV12, YUYV, RGB24 and BGR24**, which is every variant
+`PixelFormat` has, and the match is deliberately left exhaustive so that adding
+a sixth cannot compile until this endpoint handles it.
+
+That guard exists because the alternative was tried. NV12 and YUYV both went
+unhandled behind a catch-all, and the result was not a visible breakage: the
+**preview window kept working**, because `iris-ui` carries its own colour
+conversion, while `/frame` answered `500 cannot decode … to pixels` to every
+request. On Windows that was total and permanent — Media Foundation decodes a
+camera's MJPEG itself and reports NV12, so *every* frame took the dead path.
+
+The window could see and the agent could not. Since the agent is the only
+consumer that ever calls this endpoint, nothing on the desk showed it. A format
+this endpoint cannot decode is now a build failure rather than a runtime 500.
+
 ### On mirroring
 
 Webcams commonly present a mirrored "selfie" view, which puts **text held up to

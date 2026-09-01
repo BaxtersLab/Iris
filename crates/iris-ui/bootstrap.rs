@@ -415,8 +415,9 @@ impl IrisRuntime {
             drop_policy,
             roi: None,
         };
-        // Select capture backend at runtime. Use `IRIS_BACKEND=dxgi` to force DXGI on Windows,
-        // otherwise fall back to the mock backend. This keeps selection configurable and safer.
+        // Select capture backend at runtime. `IRIS_BACKEND` forces a specific
+        // one; with nothing set, Iris uses the camera if there is one and says
+        // so. It falls back to the mock only when no camera is present.
         // Increase capture telemetry capacity to reduce lag/dropped messages
         // during high-frequency or bursty capture periods in tests.
         let (capture_telemetry_tx, _capture_telemetry_rx) = broadcast::channel(4096);
@@ -425,8 +426,8 @@ impl IrisRuntime {
             .to_lowercase();
 
         // Box up a dynamic backend so `CaptureService` can be instantiated at runtime.
-        // IRIS_BACKEND: "mock" (default) | "dxgi" (Windows screen) | "wmf"
-        // (Windows camera) | "v4l2" (Linux camera).
+        // IRIS_BACKEND: unset (the camera, if present) | "mock" (synthetic) |
+        // "dxgi" (Windows screen) | "wmf" (Windows camera) | "v4l2" (Linux camera).
         let boxed_backend: Box<dyn iris_capture::backend::CaptureBackend + Send + Sync> =
             if backend_name == "dxgi" {
                 #[cfg(windows)]
@@ -539,7 +540,84 @@ impl IrisRuntime {
                         ))
                     }
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(windows)]
+                {
+                    // The same treatment as the Linux branch above: ask whether
+                    // a camera exists, use it if so, and say which backend was
+                    // chosen either way. Windows landed on the mock
+                    // unconditionally before this, so a normal desktop launch
+                    // showed the grey rectangle described above.
+                    //
+                    // Enumeration and capture take different routes on purpose.
+                    // `WmfUvcBackend::enumerate_sync` initialises COM, lists the
+                    // devices and tears COM down inside the one call, so it is
+                    // safe to ask from this thread. `backend::WmfBackend` is the
+                    // opposite: it owns thread-scoped COM/MF state
+                    // (`CoInitializeEx` + `MFStartup` in `new`, `MFShutdown` +
+                    // `CoUninitialize` in `Drop`), so it is built on a dedicated
+                    // parked thread exactly as the `IRIS_BACKEND=wmf` branch
+                    // does. It must not be built on the main thread: winit needs
+                    // that one free for its STA `OleInitialize`, and an MTA main
+                    // panics the window with `RPC_E_CHANGED_MODE`.
+                    use iris_hal::wmf_backend::wmf::WmfUvcBackend;
+                    let have_camera = matches!(
+                        WmfUvcBackend::enumerate_sync(),
+                        Ok(ref devices) if !devices.is_empty()
+                    );
+                    if have_camera {
+                        let (wmf_tx, wmf_rx) = std::sync::mpsc::channel();
+                        let _ = std::thread::Builder::new()
+                            .name("wmf-com-keeper".into())
+                            .spawn(move || {
+                                let created = iris_hal::backend::new_wmf_backend();
+                                let keep_alive = created.is_ok();
+                                let _ = wmf_tx.send(created);
+                                if keep_alive {
+                                    loop {
+                                        std::thread::park();
+                                    }
+                                }
+                            });
+                        match wmf_rx.recv() {
+                            Ok(Ok(wmf)) => {
+                                println!("Capture backend: wmf (a camera is present)");
+                                Box::new(iris_capture::backend::UvcCaptureBackend::new(
+                                    wmf,
+                                    capture_cfg.clone(),
+                                ))
+                            }
+                            // A camera was listed but Media Foundation would not
+                            // start. Falling back keeps Iris usable, but the
+                            // message must not read like "no camera found" —
+                            // that would send someone to check their cable for a
+                            // software fault.
+                            other => {
+                                let why = match other {
+                                    Ok(Err(e)) => format!("{e:?}"),
+                                    Err(e) => format!("channel: {e:?}"),
+                                    Ok(Ok(_)) => unreachable!(),
+                                };
+                                println!(
+                                    "Capture backend: mock — a camera is present but Media \
+                                     Foundation would not start ({why}). The preview will be a \
+                                     flat grey test image, not a fault."
+                                );
+                                Box::new(iris_capture::backend::MockCaptureBackend::new(
+                                    capture_cfg.clone(),
+                                ))
+                            }
+                        }
+                    } else {
+                        println!(
+                            "Capture backend: mock — no camera found. \
+                             The preview will be a flat grey test image, not a fault."
+                        );
+                        Box::new(iris_capture::backend::MockCaptureBackend::new(
+                            capture_cfg.clone(),
+                        ))
+                    }
+                }
+                #[cfg(not(any(target_os = "linux", windows)))]
                 {
                     println!("Capture backend: mock (no default camera backend on this platform)");
                     Box::new(iris_capture::backend::MockCaptureBackend::new(

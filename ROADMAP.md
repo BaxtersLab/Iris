@@ -111,13 +111,15 @@ than left silently incomplete. Format:
       another's, matching the per-uid `/tmp` fallback on unix. The handle
       returned on `ERROR_ALREADY_EXISTS` is closed immediately rather than held.
 
-- [ ] UNVERIFIED: the **cfg gating** of `single_instance`'s unix-only path tests
-      is compile-verified on Linux but **not** on Windows. `iris-ui` cannot be
-      cross-checked from the Linux box — `reqwest` pulls `ring`, whose build
-      script needs a Windows C toolchain — so `cargo check --target
-      x86_64-pc-windows-gnu` covers `iris-core`, `iris-hal` and
-      `iris-ipc-pipe-bridge` only. Confirm on the next Windows round that
-      `cargo test --workspace` is **0 failed** there.
+- [x] The **cfg gating** of `single_instance`'s unix-only path tests is confirmed
+      correct on Windows (round 5, 2026-09-01): no unix-only test ran there and no
+      failure was cfg-related. **But the suite was not 0 failed** when it arrived,
+      for an unrelated reason in the same file — both Windows tests took the live
+      product mutex name, so they raced each other (**12 failures in 20 runs**) and
+      failed outright whenever Iris was actually running. Fixed by parameterising
+      the name; `acquire()` keeps the product name and the tests use their own.
+      Both halves matter: the thing this line worried about was fine, and the file
+      was still not green. Windows final: **181 passed, 0 failed, 0 warnings**.
 
 ## Unbuilt crates — declared 2026-08-31
 

@@ -51,8 +51,6 @@ pub enum SnapshotError {
     Empty,
     #[error("frame geometry is zero ({0}x{1})")]
     ZeroSized(u32, u32),
-    #[error("cannot decode {0:?} frames to pixels")]
-    UnsupportedFormat(PixelFormat),
     #[error("mjpeg decode failed: {0}")]
     Decode(#[from] crate::mjpeg::MjpegError),
     #[error("frame buffer is {actual} bytes, expected at least {expected}")]
@@ -103,7 +101,106 @@ fn to_rgb24(frame: &CaptureFrame) -> Result<(u32, u32, Vec<u8>), SnapshotError> 
             }
             Ok((w, h, out))
         }
-        other => Err(SnapshotError::UnsupportedFormat(other.clone())),
+        PixelFormat::Nv12 => {
+            // A full-size Y plane followed by U and V interleaved at half
+            // resolution in both axes — one UV pair per 2x2 block of pixels.
+            //
+            // **This is the only format Windows ever produces here.** Media
+            // Foundation decodes a camera's MJPEG itself and reports NV12, so
+            // without this arm `/frame` returned 500 to every request on every
+            // Windows machine, while the preview window showed the camera
+            // normally because `iris-ui`'s `frame_to_rgba` has its own NV12
+            // conversion. The window could see and the agent could not.
+            //
+            // BT.601 limited range, with the **same coefficients as that
+            // preview conversion**, deliberately: two conversions of the same
+            // frame that disagree about colour would be worse than one, and
+            // the preview's is the one a human has already looked at and
+            // accepted. If either changes, change both.
+            //
+            // Chroma geometry is computed rather than assumed to be `w*h/2`:
+            // an odd width carries a padded chroma row, and rounding the
+            // index down is what 4:2:0 means — the trailing column shares the
+            // last pair rather than reading off the end.
+            let chroma_stride = ((wu + 1) / 2) * 2;
+            let chroma_rows = (hu + 1) / 2;
+            let need = wu * hu + chroma_stride * chroma_rows;
+            if frame.data.len() < need {
+                return Err(SnapshotError::Truncated {
+                    actual: frame.data.len(),
+                    expected: need,
+                });
+            }
+            let d = &frame.data;
+            let uv_base = wu * hu;
+            let mut out = Vec::with_capacity(wu * hu * 3);
+            for y in 0..hu {
+                for x in 0..wu {
+                    let yv = d[y * wu + x] as f32;
+                    let uvi = uv_base + (y / 2) * chroma_stride + (x / 2) * 2;
+                    let u = d[uvi] as f32 - 128.0;
+                    let v = d[uvi + 1] as f32 - 128.0;
+                    let c = yv - 16.0;
+                    out.push((1.164 * c + 1.596 * v).clamp(0.0, 255.0) as u8);
+                    out.push((1.164 * c - 0.392 * u - 0.813 * v).clamp(0.0, 255.0) as u8);
+                    out.push((1.164 * c + 2.017 * u).clamp(0.0, 255.0) as u8);
+                }
+            }
+            Ok((w, h, out))
+        }
+        PixelFormat::Yuyv => {
+            // 4:2:2 packed: `Y0 U Y1 V` describes **two** horizontally adjacent
+            // pixels, so a macropixel is four bytes and the two pixels share one
+            // U/V pair while keeping their own luma.
+            //
+            // The same hole as `Nv12` above, one format along, and it was left
+            // open when that one was closed: `ui_app.rs` converts YUYV for the
+            // preview and this module did not, so a camera delivering YUYV shows
+            // a correct window and answers `/frame` with 500. That failure is
+            // invisible from the desk and visible only to the agent — which is
+            // the whole reason it is worth fixing before a camera finds it.
+            // V4L2 offers YUYV on plenty of UVC devices; no exotic hardware is
+            // needed to hit it.
+            //
+            // Same BT.601 limited-range coefficients as the `Nv12` arm and the
+            // preview. Three sites now agree; if one changes, change all three.
+            //
+            // Geometry is computed, not assumed to be `w * h * 2`: an odd width
+            // still costs a whole trailing macropixel, and rounding the row
+            // stride down is what would read off the end of the last row.
+            let macropixels_per_row = (wu + 1) / 2;
+            let row_stride = macropixels_per_row * 4;
+            let need = row_stride * hu;
+            if frame.data.len() < need {
+                return Err(SnapshotError::Truncated {
+                    actual: frame.data.len(),
+                    expected: need,
+                });
+            }
+            let d = &frame.data;
+            let mut out = Vec::with_capacity(wu * hu * 3);
+            for y in 0..hu {
+                for x in 0..wu {
+                    let pair = y * row_stride + (x / 2) * 4;
+                    // Luma is per pixel — `Y0` or `Y1` depending on which half
+                    // of the pair this is — while U and V come from the pair.
+                    let yv = d[pair + (x % 2) * 2] as f32;
+                    let u = d[pair + 1] as f32 - 128.0;
+                    let v = d[pair + 3] as f32 - 128.0;
+                    let c = yv - 16.0;
+                    out.push((1.164 * c + 1.596 * v).clamp(0.0, 255.0) as u8);
+                    out.push((1.164 * c - 0.392 * u - 0.813 * v).clamp(0.0, 255.0) as u8);
+                    out.push((1.164 * c + 2.017 * u).clamp(0.0, 255.0) as u8);
+                }
+            }
+            Ok((w, h, out))
+        }
+        // No catch-all. Every `PixelFormat` variant is handled above, and
+        // leaving the match exhaustive is deliberate: adding a sixth variant
+        // must not compile until `/frame` can decode it. Both NV12 and YUYV
+        // reached production as a silent HTTP 500 that only an agent could
+        // see, precisely because a catch-all turned "nobody wrote this yet"
+        // into a runtime answer instead of a build failure.
     }
 }
 
@@ -421,6 +518,170 @@ mod tests {
     fn a_truncated_frame_is_reported_not_guessed() {
         let err = snapshot(&frame(64, 64, PixelFormat::Rgb24, vec![1, 2, 3]), 0, 80, false).unwrap_err();
         assert!(matches!(err, SnapshotError::Truncated { .. }), "{err}");
+    }
+
+    // ---- NV12 -------------------------------------------------------------
+    //
+    // Windows Media Foundation decodes a camera's MJPEG transparently and
+    // hands back **NV12**, so on Windows every frame reaching this module is
+    // NV12 and nothing else. Without this arm `/frame` answered
+    // `500 {"error":"snapshot failed: cannot decode Nv12 frames to pixels"}`
+    // to every request, on every Windows machine, for every camera — while the
+    // preview window showed the camera perfectly, because `ui_app.rs` has its
+    // own NV12 conversion. The window could see and the agent could not.
+
+    /// Build a `w`x`h` NV12 buffer with a constant Y and a constant UV pair.
+    fn nv12(w: u32, h: u32, y: u8, u: u8, v: u8) -> Vec<u8> {
+        let (wu, hu) = (w as usize, h as usize);
+        let mut d = vec![y; wu * hu];
+        d.extend(
+            std::iter::repeat([u, v])
+                .take(wu * hu / 4)
+                .flatten(),
+        );
+        d
+    }
+
+    /// The decode must produce the colour the YUV triple names, not merely
+    /// succeed. A conversion that returns the right number of wrong bytes
+    /// still hands a vision model a picture of nothing.
+    #[test]
+    fn nv12_decodes_to_the_colour_it_encodes() {
+        // Y=81 U=90 V=240 is BT.601 limited-range RED.
+        let f = frame(2, 2, PixelFormat::Nv12, nv12(2, 2, 81, 90, 240));
+        let (w, h, rgb) = to_rgb24(&f).expect("NV12 must decode");
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(rgb.len(), 2 * 2 * 3, "RGB24 is three bytes per pixel");
+        let (r, g, b) = (rgb[0], rgb[1], rgb[2]);
+        assert!(r > 200, "red channel should dominate, got r={r} g={g} b={b}");
+        assert!(g < 60 && b < 60, "green/blue should be low, got r={r} g={g} b={b}");
+
+        // And the achromatic case: U=V=128 must give equal channels (grey).
+        // This catches a chroma-centring error — dropping the `- 128.0` bias
+        // turns neutral into magenta. It does **not** catch swapped U and V
+        // planes, though: at U == V a swap is a no-op by construction. The red
+        // assertion above is what catches that, verified by swapping the two
+        // reads and watching this test fail on `r=15 g=62 b=255`.
+        let f = frame(2, 2, PixelFormat::Nv12, nv12(2, 2, 128, 128, 128));
+        let (_, _, rgb) = to_rgb24(&f).expect("NV12 must decode");
+        let (r, g, b) = (rgb[0] as i32, rgb[1] as i32, rgb[2] as i32);
+        assert!(
+            (r - g).abs() <= 2 && (g - b).abs() <= 2,
+            "neutral chroma must give a grey pixel, got r={r} g={g} b={b}"
+        );
+    }
+
+    /// A short NV12 buffer must be reported, not indexed past the end. The
+    /// preview's version of this conversion silently skips a short frame;
+    /// here the caller is an HTTP client that deserves an answer.
+    #[test]
+    fn a_truncated_nv12_frame_is_reported() {
+        let err = snapshot(
+            &frame(64, 64, PixelFormat::Nv12, vec![7; 64 * 64]), // Y only, no UV
+            0,
+            80,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SnapshotError::Truncated { .. }), "{err}");
+    }
+
+    /// End to end: an NV12 frame must come out of `snapshot` as a real JPEG.
+    #[test]
+    fn an_nv12_frame_reaches_a_jpeg() {
+        let snap = snapshot(&frame(64, 64, PixelFormat::Nv12, nv12(64, 64, 128, 128, 128)), 0, 80, false)
+            .expect("NV12 must reach a JPEG");
+        assert_eq!((snap.width, snap.height), (64, 64));
+        assert!(snap.data_url().starts_with("data:image/jpeg;base64,"));
+    }
+
+    // ---- YUYV -------------------------------------------------------------
+    //
+    // The gap left open when NV12 was closed. `/frame` answered 500 to any
+    // camera delivering YUYV while the preview window showed it correctly,
+    // because `ui_app.rs` has its own YUYV conversion and this module had none.
+    // No YUYV hardware is needed to prove the conversion: it is pure, so a
+    // constructed buffer exercises it exactly as the camera would.
+
+    /// Build a `w`x`h` YUYV buffer by repeating one `Y0 U Y1 V` macropixel.
+    fn yuyv(w: u32, h: u32, y0: u8, u: u8, y1: u8, v: u8) -> Vec<u8> {
+        let (wu, hu) = (w as usize, h as usize);
+        std::iter::repeat([y0, u, y1, v])
+            .take(((wu + 1) / 2) * hu)
+            .flatten()
+            .collect()
+    }
+
+    /// Colour, not merely success — and the two halves of a macropixel must
+    /// keep their **own** luma while sharing one chroma pair. Using `Y0` for
+    /// both pixels is the obvious way to write this arm wrong, and it would
+    /// still produce the right number of bytes.
+    #[test]
+    fn yuyv_decodes_to_the_colour_it_encodes() {
+        // Y=81 U=90 V=240 is BT.601 limited-range RED, in both halves.
+        let f = frame(2, 2, PixelFormat::Yuyv, yuyv(2, 2, 81, 90, 81, 240));
+        let (w, h, rgb) = to_rgb24(&f).expect("YUYV must decode");
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(rgb.len(), 2 * 2 * 3, "RGB24 is three bytes per pixel");
+        let (r, g, b) = (rgb[0], rgb[1], rgb[2]);
+        assert!(r > 200, "red channel should dominate, got r={r} g={g} b={b}");
+        assert!(g < 60 && b < 60, "green/blue should be low, got r={r} g={g} b={b}");
+
+        // Per-pixel luma: black then white across one macropixel, neutral
+        // chroma. If the arm reads Y0 for both, the two pixels come out equal.
+        let f = frame(2, 1, PixelFormat::Yuyv, yuyv(2, 1, 16, 128, 235, 128));
+        let (_, _, rgb) = to_rgb24(&f).expect("YUYV must decode");
+        let (p0, p1) = (rgb[0] as i32, rgb[3] as i32);
+        assert!(p0 < 20, "first pixel of the pair should be black, got {p0}");
+        assert!(p1 > 230, "second pixel of the pair should be white, got {p1}");
+
+        // Neutral chroma must give equal channels, which catches a dropped
+        // `- 128.0` bias exactly as it does for NV12.
+        let f = frame(2, 2, PixelFormat::Yuyv, yuyv(2, 2, 128, 128, 128, 128));
+        let (_, _, rgb) = to_rgb24(&f).expect("YUYV must decode");
+        let (r, g, b) = (rgb[0] as i32, rgb[1] as i32, rgb[2] as i32);
+        assert!(
+            (r - g).abs() <= 2 && (g - b).abs() <= 2,
+            "neutral chroma must give a grey pixel, got r={r} g={g} b={b}"
+        );
+    }
+
+    /// A short YUYV buffer must be reported rather than indexed past the end.
+    #[test]
+    fn a_truncated_yuyv_frame_is_reported() {
+        let err = snapshot(
+            &frame(64, 64, PixelFormat::Yuyv, vec![7; 64 * 64]), // half a frame
+            0,
+            80,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SnapshotError::Truncated { .. }), "{err}");
+    }
+
+    /// An odd width still costs a whole trailing macropixel. Assuming a
+    /// `w * 2` row stride reads off the end of the last row; this is the case
+    /// that catches it, and it must decode rather than panic.
+    #[test]
+    fn an_odd_width_yuyv_frame_does_not_read_off_the_end() {
+        let f = frame(3, 2, PixelFormat::Yuyv, yuyv(3, 2, 128, 128, 128, 128));
+        let (w, h, rgb) = to_rgb24(&f).expect("an odd width must decode");
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(rgb.len(), 3 * 2 * 3);
+    }
+
+    /// End to end: a YUYV frame must come out of `snapshot` as a real JPEG.
+    #[test]
+    fn a_yuyv_frame_reaches_a_jpeg() {
+        let snap = snapshot(
+            &frame(64, 64, PixelFormat::Yuyv, yuyv(64, 64, 128, 128, 128, 128)),
+            0,
+            80,
+            false,
+        )
+        .expect("YUYV must reach a JPEG");
+        assert_eq!((snap.width, snap.height), (64, 64));
+        assert!(snap.data_url().starts_with("data:image/jpeg;base64,"));
     }
 
     #[test]

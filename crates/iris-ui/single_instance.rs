@@ -159,10 +159,35 @@ pub const MUTEX_NAME: &str = r"Local\BaxtersLab.Iris.SingleInstance";
 /// keeping it would hold a second reference to a mutex we do not own.
 #[cfg(windows)]
 pub fn acquire() -> Instance {
+    acquire_named(MUTEX_NAME)
+}
+
+/// The body of `acquire`, with the mutex name passed in.
+///
+/// Split out **for the tests**, which must not take the live product name.
+/// The unix test above already worked this way on purpose — "uses its own file
+/// rather than the live lock so it cannot interfere with a running instance" —
+/// and the Windows tests written alongside it did not. Sharing one process-wide
+/// name had three consequences, all of them real:
+///
+/// * The two Windows tests raced **each other**. libtest runs them on parallel
+///   threads, one holds the mutex for the length of its body, and the other
+///   asserts it can take that same name — so either could fail depending on
+///   scheduling. Measured on this box: **12 failures in 20 runs** in parallel,
+///   0 in 20 with `--test-threads=1`, 0 in 20 run alone.
+/// * The suite failed outright **whenever Iris was actually running**, because
+///   the live instance owns the name the tests demand.
+/// * Running the suite briefly **held the real single-instance name**, so a
+///   genuine launch during a test run could be refused.
+///
+/// Making the name a parameter removes all three, and leaves `acquire()` itself
+/// the one caller that uses the product name.
+#[cfg(windows)]
+pub(crate) fn acquire_named(name: &str) -> Instance {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
 
-    let wide: Vec<u16> = MUTEX_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     // bInitialOwner = false: ownership is irrelevant here. Existence is the
     // signal, and not owning it avoids the abandoned-mutex state entirely.
     let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
@@ -176,12 +201,12 @@ pub fn acquire() -> Instance {
             // A named mutex carries no payload, so there is no pid to report.
             // `main.rs` already handles `None`.
             pid: None,
-            path: PathBuf::from(MUTEX_NAME),
+            path: PathBuf::from(name),
         };
     }
     Instance::Acquired(InstanceLock {
         _handle: MutexHandle(handle),
-        path: PathBuf::from(MUTEX_NAME),
+        path: PathBuf::from(name),
     })
 }
 #[cfg(all(not(unix), not(windows)))]
@@ -197,6 +222,11 @@ pub fn acquire() -> Instance {
 
 #[cfg(test)]
 mod tests {
+    // `#[cfg(unix)]`: the unix tests below call `lock_path` unqualified and
+    // need this; every Windows test qualifies with `super::`, so ungated it is
+    // an unused import there — one warning, in a project that otherwise builds
+    // clean, on the platform that cannot be compiled from the Linux box.
+    #[cfg(unix)]
     use super::*;
 
     /// These three cover the unix lock-file path selection and are meaningless
@@ -279,20 +309,44 @@ mod tests {
     /// process created the mutex first, so holding one and asking again inside
     /// a single test exercises the real discriminator rather than a simulation
     /// of it.
+    /// A name unique to this test, so the tests neither race each other nor
+    /// touch the live instance. See `acquire_named`'s docs for the three
+    /// failures that sharing one name actually caused.
+    #[cfg(windows)]
+    fn test_name(tag: &str) -> String {
+        format!(r"Local\BaxtersLab.Iris.Test.{}.{tag}", std::process::id())
+    }
+
     #[cfg(windows)]
     #[test]
     fn a_second_acquire_is_refused_while_the_first_is_held() {
-        let first = super::acquire();
+        let name = test_name("second-acquire");
+        let first = super::acquire_named(&name);
         let _held = match first {
             super::Instance::Acquired(lock) => lock,
             other => panic!("expected to acquire the mutex first, got {other:?}"),
         };
-        match super::acquire() {
+        match super::acquire_named(&name) {
             super::Instance::AlreadyRunning { pid, path } => {
                 assert!(pid.is_none(), "a named mutex carries no pid, got {pid:?}");
-                assert_eq!(path, std::path::PathBuf::from(super::MUTEX_NAME));
+                assert_eq!(path, std::path::PathBuf::from(&name));
             }
             other => panic!("second acquire must be refused, got {other:?}"),
+        }
+    }
+
+    /// `acquire()` must ask for the **product** name — the parameterisation
+    /// above exists for the tests, and would be worthless if the one caller
+    /// that matters drifted off it. True whichever answer comes back, so this
+    /// neither needs nor takes the live mutex.
+    #[cfg(windows)]
+    #[test]
+    fn acquire_uses_the_product_name() {
+        let want = std::path::PathBuf::from(super::MUTEX_NAME);
+        match super::acquire() {
+            super::Instance::Acquired(lock) => assert_eq!(lock.path, want),
+            super::Instance::AlreadyRunning { path, .. } => assert_eq!(path, want),
+            super::Instance::Unavailable(e) => panic!("guard unavailable: {e}"),
         }
     }
 
@@ -302,11 +356,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn releasing_the_handle_frees_the_name() {
-        match super::acquire() {
+        let name = test_name("release");
+        match super::acquire_named(&name) {
             super::Instance::Acquired(lock) => drop(lock),
             other => panic!("expected to acquire, got {other:?}"),
         }
-        match super::acquire() {
+        match super::acquire_named(&name) {
             super::Instance::Acquired(_) => {}
             other => panic!("the name must be free after the handle is dropped, got {other:?}"),
         }
