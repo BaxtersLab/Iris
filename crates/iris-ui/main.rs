@@ -68,6 +68,7 @@ async fn main() {
             let rt = _rt; // keep ownership
             let ipc = std::sync::Arc::new(rt.ipc_handle);
             let capture_handle = rt.capture_handle;
+            let control_handle = rt.control_handle;
 
             // If headless mode is requested, run a scripted interaction sequence and exit.
             if std::env::var("IRIS_UI_HEADLESS").unwrap_or_default() == "1" {
@@ -154,7 +155,11 @@ async fn main() {
                     visuals.override_text_color = Some(egui::Color32::WHITE);
                     ctx.set_visuals(visuals);
 
-                    Box::new(iris_ui::ui_app::IrisApp::new(ipc.clone(), capture_handle))
+                    Box::new(iris_ui::ui_app::IrisApp::new(
+                        ipc.clone(),
+                        capture_handle,
+                        control_handle.clone(),
+                    ))
                 }),
             );
             if let Err(e) = run {

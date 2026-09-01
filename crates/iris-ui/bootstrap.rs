@@ -27,6 +27,12 @@ pub struct IrisRuntime {
     pub app_state: Arc<AppState>,
     pub ipc_handle: IpcHandle,
     pub capture_handle: CaptureHandle,
+    /// Camera controls, when this platform has a backend for them.
+    ///
+    /// `None` on a platform with no UVC control backend — the UI then says so
+    /// rather than showing an empty panel that looks like a camera with no
+    /// controls. Those are different facts.
+    pub control_handle: Option<iris_control::ControlHandle>,
     // Join handles for spawned services so the caller may await or drop
     _tasks: Vec<JoinHandle<()>>,
     // Keep a clone of the capture telemetry sender alive for the lifetime of the runtime
@@ -216,6 +222,56 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
 }
 
 impl IrisRuntime {
+    /// Start a control service over this platform's UVC backend, if it has one.
+    ///
+    /// Returns `None` where no control backend exists, so the UI can say
+    /// "controls are unavailable on this build" rather than showing an empty
+    /// list, which would read as "this camera has no controls".
+    fn spawn_control_service(
+        config: &iris_core::config::IrisConfig,
+        telemetry_tx: broadcast::Sender<iris_ipc::telemetry::TelemetryEnvelope>,
+    ) -> Option<iris_control::ControlHandle> {
+        let profiles_dir = iris_core::config::IrisConfig::config_search_paths()
+            .first()
+            .and_then(|p| p.parent().map(|d| d.join("profiles")))
+            .unwrap_or_else(|| std::path::PathBuf::from("profiles"));
+
+        // Which device? The configured preference if there is one, else the
+        // first the platform enumerates. Enumeration does not require the
+        // device to be open.
+        #[cfg(target_os = "linux")]
+        {
+            use iris_hal::v4l2_backend::v4l2::V4l2UvcBackend;
+            let devices = V4l2UvcBackend::enumerate_sync().ok()?;
+            let chosen = if config.device.preferred_device.is_empty() {
+                devices.first()?.id.clone()
+            } else {
+                devices
+                    .iter()
+                    .find(|d| d.id.0 == config.device.preferred_device)
+                    .or_else(|| devices.first())?
+                    .id
+                    .clone()
+            };
+            let backend = std::sync::Arc::new(V4l2UvcBackend::new());
+            let (svc, handle) = iris_control::ControlService::new(
+                backend,
+                chosen.clone(),
+                telemetry_tx,
+                profiles_dir,
+            );
+            println!("ControlService: managing controls for {chosen}");
+            tokio::spawn(svc.run());
+            return Some(handle);
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (config, telemetry_tx, profiles_dir);
+            None
+        }
+    }
+
     pub async fn bootstrap(config: IrisConfig) -> IrisResult<Self> {
         // 1. App state
         let app_state = AppState::new();
@@ -648,10 +704,22 @@ impl IrisRuntime {
             println!("Dispatcher: exiting");
         }));
 
+        // Camera controls. A SEPARATE backend instance from the capture path on
+        // purpose: capture holds the device streaming, and V4L2 permits a
+        // second open for control ioctls on its own fd. Sharing one instance
+        // would mean the control service and the capture loop contending for
+        // the same handle.
+        //
+        // The device is opened by the service itself when it starts, and the
+        // profiles directory sits beside the config so a profile is findable
+        // next to the settings it belongs with.
+        let control_handle = Self::spawn_control_service(&config, telemetry_tx.clone());
+
         Ok(Self {
             app_state,
             ipc_handle,
             capture_handle,
+            control_handle,
             _tasks: tasks,
             _capture_telemetry_tx: capture_telemetry_tx.clone(),
             _capture_telemetry_keepalive: capture_keepalive,

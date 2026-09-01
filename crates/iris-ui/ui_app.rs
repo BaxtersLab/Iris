@@ -223,10 +223,25 @@ pub struct IrisApp {
     // Wall clock of the last drain-stats line, so the report is periodic rather
     // than per-repaint.
     perf_last_report: Option<std::time::Instant>,
+    // Settings panel, opened from the gear at the right of the control strip.
+    show_settings: bool,
+    /// The camera's controls as last read. `None` until settings is opened —
+    /// listing them talks to the device, so it is done on demand rather than
+    /// on every repaint.
+    controls: Arc<Mutex<Option<Vec<iris_control::ControlCapability>>>>,
+    /// Why the control list is unavailable, when it is. Shown verbatim: "no
+    /// camera selected" and "the driver refused" are different problems and the
+    /// operator can only act on the difference if it is stated.
+    controls_error: Arc<Mutex<Option<String>>>,
+    control: Option<iris_control::ControlHandle>,
 }
 
 impl IrisApp {
-    pub fn new(ipc: Arc<IpcHandle>, capture: CaptureHandle) -> Self {
+    pub fn new(
+        ipc: Arc<IpcHandle>,
+        capture: CaptureHandle,
+        control: Option<iris_control::ControlHandle>,
+    ) -> Self {
         let telemetry_rx = ipc.subscribe_telemetry();
         let app = Self {
             ipc: ipc.clone(),
@@ -244,6 +259,10 @@ impl IrisApp {
             frames_received: 0,
             frames_converted: 0,
             perf_last_report: None,
+            show_settings: false,
+            controls: Arc::new(Mutex::new(None)),
+            controls_error: Arc::new(Mutex::new(None)),
+            control,
         };
 
         // fetch initial device list and auto-select the first device if present
@@ -289,6 +308,179 @@ impl IrisApp {
 }
 
 impl IrisApp {
+    /// Rescan for cameras. Shared by the strip button and the R shortcut, which
+    /// had two copies of this before the control strip landed.
+    fn refresh_devices(&self) {
+        let ipc = Arc::clone(&self.ipc);
+        let devices_ref = self.devices.clone();
+        let summary_ref = self.last_scan_summary.clone();
+        let log_ref = self.log.clone();
+        tokio::spawn(async move {
+            match ipc.send_command(IpcCommand::ListDevices).await {
+                Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) => {
+                    let names: Vec<String> = devices.iter().map(|d| d.name.clone()).collect();
+                    let summary =
+                        format!("Found {} device(s): {}", devices.len(), names.join(", "));
+                    println!("Detect Cameras: {summary}");
+                    if let Ok(mut lg) = log_ref.lock() {
+                        lg.push(format!("[Scan] {summary}"));
+                    }
+                    if let Ok(mut s) = summary_ref.lock() {
+                        *s = summary;
+                    }
+                    if let Ok(mut dv) = devices_ref.lock() {
+                        *dv = devices;
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("Scan error: {e:?}");
+                    println!("Detect Cameras: {msg}");
+                    if let Ok(mut lg) = log_ref.lock() {
+                        lg.push(format!("[Scan] {msg}"));
+                    }
+                    if let Ok(mut s) = summary_ref.lock() {
+                        *s = msg;
+                    }
+                }
+                _ => {}
+            }
+        });
+    }
+
+    /// Ask the camera what controls it has.
+    ///
+    /// On demand rather than per repaint: every call talks to the device, and
+    /// a 60 Hz repaint loop would hammer the driver with QUERYCTRL for a panel
+    /// that is usually closed.
+    fn refresh_controls(&self) {
+        let Some(control) = self.control.clone() else {
+            if let Ok(mut e) = self.controls_error.lock() {
+                *e = Some(
+                    "camera controls are unavailable — no control service is running \
+                     (this build has no control backend for the selected device)"
+                        .to_string(),
+                );
+            }
+            return;
+        };
+        let controls_ref = self.controls.clone();
+        let error_ref = self.controls_error.clone();
+        tokio::spawn(async move {
+            match control.list_controls().await {
+                Ok(list) => {
+                    if let Ok(mut e) = error_ref.lock() {
+                        *e = if list.is_empty() {
+                            Some("this camera exposes no adjustable controls".to_string())
+                        } else {
+                            None
+                        };
+                    }
+                    if let Ok(mut c) = controls_ref.lock() {
+                        *c = Some(list);
+                    }
+                }
+                Err(err) => {
+                    if let Ok(mut e) = error_ref.lock() {
+                        *e = Some(format!("{err}"));
+                    }
+                }
+            }
+        });
+    }
+
+    /// The camera-control section of the settings panel.
+    ///
+    /// A slider per control, built from the driver's own reported range and
+    /// step. `set_control` refuses a value off the step grid, so the slider
+    /// snaps with `clamp_value` before sending — a slider that can produce a
+    /// rejected value is a slider that sometimes does nothing.
+    fn settings_controls_ui(&mut self, ui: &mut egui::Ui) {
+        if let Ok(err) = self.controls_error.lock() {
+            if let Some(msg) = err.as_ref() {
+                ui.label(egui::RichText::new(msg).italics().weak());
+                return;
+            }
+        }
+
+        let snapshot = match self.controls.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => None,
+        };
+        let Some(list) = snapshot else {
+            ui.label(egui::RichText::new("reading controls from the camera…").weak());
+            return;
+        };
+        if list.is_empty() {
+            ui.label(egui::RichText::new("this camera exposes no adjustable controls").weak());
+            return;
+        }
+
+        let mut pending: Vec<(iris_control::CameraControl, i64)> = Vec::new();
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .id_source("controls_scroll")
+            .show(ui, |ui| {
+                for cap in &list {
+                    let mut value = cap.current;
+                    ui.horizontal(|ui| {
+                        ui.label(cap.control.name());
+                        if cap.auto.is_toggleable() {
+                            ui.label(egui::RichText::new("(auto available)").small().weak());
+                        }
+                    });
+                    let resp = ui.add(
+                        egui::Slider::new(&mut value, cap.min..=cap.max)
+                            .step_by(cap.step.max(1) as f64)
+                            .show_value(true),
+                    );
+                    if resp.changed() {
+                        let snapped = cap.clamp_value(value);
+                        pending.push((cap.control.clone(), snapped));
+                    }
+                }
+            });
+
+        for (control, value) in pending {
+            self.apply_control(control, value);
+        }
+    }
+
+    /// Send one control change, then re-read so the panel shows what the camera
+    /// actually took rather than what was asked for.
+    fn apply_control(&self, control: iris_control::CameraControl, value: i64) {
+        let Some(handle) = self.control.clone() else {
+            return;
+        };
+        let controls_ref = self.controls.clone();
+        let error_ref = self.controls_error.clone();
+        let log_ref = self.log.clone();
+        tokio::spawn(async move {
+            let name = control.name();
+            match handle.set_control(control, value).await {
+                Ok(()) => {
+                    if let Ok(mut lg) = log_ref.lock() {
+                        lg.push(format!("[Control] {name} = {value}"));
+                    }
+                    // Re-read: a driver may clamp or refuse, and the panel must
+                    // show the camera's state, not the request.
+                    if let Ok(list) = handle.list_controls().await {
+                        if let Ok(mut c) = controls_ref.lock() {
+                            *c = Some(list);
+                        }
+                    }
+                }
+                Err(e) => {
+                    if let Ok(mut lg) = log_ref.lock() {
+                        lg.push(format!("[Control] {name} = {value} refused: {e}"));
+                    }
+                    if let Ok(mut err) = error_ref.lock() {
+                        *err = Some(format!("{e}"));
+                    }
+                }
+            }
+        });
+    }
+
     /// Keep the window repainting while there is something live to show.
     ///
     /// egui is an immediate-mode GUI with a **reactive** run loop: eframe calls
@@ -409,25 +601,42 @@ impl eframe::App for IrisApp {
             }
         }
 
+        // Title bar. It read "Iris — Mock UI" until 2026-08-31, a label from
+        // before there was a real pipeline behind it — and the first thing
+        // visible in any screenshot of the app.
         TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Iris — Mock UI");
-                ui.label("(Keyboard: S=start, T=stop, R=refresh devices)  Tab order: [1] Start  [2] Stop  [3] Refresh");
+                ui.label("Iris");
+                ui.separator();
+                ui.label("Keyboard: S start · T stop · R refresh devices");
+            });
+        });
 
-                // Enable Start only when a device is selected
+        // The control strip. Everything that DOES something lives along the
+        // bottom, with settings pinned to the far right — so the strip reads
+        // left to right as "act on the camera", and configuration is out of the
+        // way of the actions rather than mixed in with them.
+        TopBottomPanel::bottom("control_strip").show(ctx, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                // Start is disabled until a device is chosen: it is the one
+                // action here that cannot mean anything without one.
                 let has_device = match self.selected_device.lock() {
                     Ok(g) => g.is_some(),
                     Err(_) => false,
                 };
 
-                let mut start_button = egui::Button::new("Start Capture");
+                let mut start_button = egui::Button::new("▶ Start");
                 if self.is_capturing {
                     start_button = start_button.fill(Color32::from_rgb(76, 175, 80));
                 }
-                let start_resp = ui
-                    .add_enabled(has_device, start_button)
-                    .on_hover_text(if has_device { "Start camera capture" } else { "Select a device first" });
-                ui.label("[1]");
+                let start_resp = ui.add_enabled(has_device, start_button).on_hover_text(
+                    if has_device {
+                        "Start camera capture  (S)"
+                    } else {
+                        "Select a camera first"
+                    },
+                );
                 if start_resp.clicked() {
                     start_resp.request_focus();
                     self.is_capturing = true;
@@ -436,17 +645,17 @@ impl eframe::App for IrisApp {
                         let _ = ipc.send_command(IpcCommand::StartCapture).await;
                     });
                 }
-                // Visual focus outline if widget has keyboard focus
                 if start_resp.has_focus() {
-                    let rect = start_resp.rect;
-                    let stroke = Stroke::new(1.0_f32, Color32::BLACK);
-                    ui.painter().rect_stroke(rect, Rounding::same(4.0), stroke);
+                    ui.painter().rect_stroke(
+                        start_resp.rect,
+                        Rounding::same(4.0),
+                        Stroke::new(1.0_f32, Color32::BLACK),
+                    );
                 }
 
                 let stop_resp = ui
-                    .add_enabled(true, egui::Button::new("Stop Capture"))
-                    .on_hover_text("Stop camera capture");
-                ui.label("[2]");
+                    .add_enabled(true, egui::Button::new("■ Stop"))
+                    .on_hover_text("Stop camera capture  (T)");
                 if stop_resp.clicked() {
                     stop_resp.request_focus();
                     self.is_capturing = false;
@@ -456,63 +665,97 @@ impl eframe::App for IrisApp {
                     });
                 }
                 if stop_resp.has_focus() {
-                    let rect = stop_resp.rect;
-                    let stroke = Stroke::new(1.0_f32, Color32::BLACK);
-                    ui.painter().rect_stroke(rect, Rounding::same(4.0), stroke);
+                    ui.painter().rect_stroke(
+                        stop_resp.rect,
+                        Rounding::same(4.0),
+                        Stroke::new(1.0_f32, Color32::BLACK),
+                    );
                 }
+
+                ui.separator();
+
+                let scan_resp = ui
+                    .button("Detect Cameras")
+                    .on_hover_text("Scan for connected cameras  (R)");
+                if scan_resp.clicked() {
+                    scan_resp.request_focus();
+                    self.refresh_devices();
+                }
+
+                // Settings sits at the FAR RIGHT of the strip. right_to_left
+                // lays out from the right edge, so this stays pinned there as
+                // the window is resized rather than drifting with the buttons
+                // to its left.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let gear = ui
+                        .button("⚙")
+                        .on_hover_text("Settings — camera controls and capture info");
+                    if gear.clicked() {
+                        self.show_settings = !self.show_settings;
+                        if self.show_settings {
+                            self.refresh_controls();
+                        }
+                    }
+                });
             });
+            ui.add_space(2.0);
         });
+
+        // Settings. A side panel rather than a modal window: the preview stays
+        // visible, which is the whole point of adjusting a camera control — you
+        // are watching the effect while you drag.
+        if self.show_settings {
+            egui::SidePanel::right("settings_panel")
+                .min_width(260.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("Settings");
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if ui.button("✕").on_hover_text("Close settings").clicked() {
+                                    self.show_settings = false;
+                                }
+                                if ui.button("⟳").on_hover_text("Re-read from the camera").clicked() {
+                                    self.refresh_controls();
+                                }
+                            },
+                        );
+                    });
+                    ui.separator();
+
+                    ui.label(egui::RichText::new("Camera controls").strong());
+                    self.settings_controls_ui(ui);
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(egui::RichText::new("Capture").strong());
+                    if let Ok(lf) = self.last_frame_info.lock() {
+                        match *lf {
+                            Some((w, h)) => {
+                                ui.label(format!("Frames: {w}x{h}"));
+                            }
+                            None => {
+                                ui.label(egui::RichText::new("No frames yet").weak());
+                            }
+                        }
+                    }
+                    let converted = if self.frames_received == 0 {
+                        0.0
+                    } else {
+                        (self.frames_converted as f64 / self.frames_received as f64) * 100.0
+                    };
+                    ui.label(format!(
+                        "Preview: {} of {} frames drawn ({converted:.0}%)",
+                        self.frames_converted, self.frames_received
+                    ));
+                });
+        }
 
         CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.heading("Cameras");
-                    let scan_resp = ui
-                        .button("Detect Cameras")
-                        .on_hover_text("Scan for physical cameras (or press R)");
-                    ui.label("[3]");
-                    if scan_resp.clicked() {
-                        scan_resp.request_focus();
-                        let ipc = Arc::clone(&self.ipc);
-                        let devices_ref = self.devices.clone();
-                        let summary_ref = self.last_scan_summary.clone();
-                        let log_ref = self.log.clone();
-                        tokio::spawn(async move {
-                            match ipc.send_command(IpcCommand::ListDevices).await {
-                                Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) => {
-                                    let count = devices.len();
-                                    let names: Vec<String> = devices.iter().map(|d| d.name.clone()).collect();
-                                    let summary = format!("Found {} device(s): {}", count, names.join(", "));
-                                    println!("Detect Cameras: {}", summary);
-                                    if let Ok(mut lg) = log_ref.lock() {
-                                        lg.push(format!("[Scan] {}", summary));
-                                    }
-                                    if let Ok(mut s) = summary_ref.lock() {
-                                        *s = summary;
-                                    }
-                                    if let Ok(mut dv) = devices_ref.lock() {
-                                        *dv = devices;
-                                    }
-                                }
-                                Err(e) => {
-                                    let msg = format!("Scan error: {:?}", e);
-                                    println!("Detect Cameras: {}", msg);
-                                    if let Ok(mut lg) = log_ref.lock() {
-                                        lg.push(format!("[Scan] {}", msg));
-                                    }
-                                    if let Ok(mut s) = summary_ref.lock() {
-                                        *s = msg;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        });
-                    }
-                    if scan_resp.has_focus() {
-                        let rect = scan_resp.rect;
-                        let stroke = Stroke::new(1.0_f32, Color32::BLACK);
-                        ui.painter().rect_stroke(rect, Rounding::same(4.0), stroke);
-                    }
 
                     // Show last scan result
                     if let Ok(s) = self.last_scan_summary.lock() {
@@ -693,28 +936,7 @@ impl eframe::App for IrisApp {
                 });
             }
             if input.key_pressed(Key::R) {
-                let ipc = Arc::clone(&self.ipc);
-                let devices_ref = self.devices.clone();
-                let summary_ref = self.last_scan_summary.clone();
-                let log_ref = self.log.clone();
-                tokio::spawn(async move {
-                    match ipc.send_command(IpcCommand::ListDevices).await {
-                        Ok(IpcResponse::Ok(ResponseData::DeviceList { devices })) => {
-                            let count = devices.len();
-                            let names: Vec<String> = devices.iter().map(|d| d.name.clone()).collect();
-                            let summary = format!("Found {} device(s): {}", count, names.join(", "));
-                            if let Ok(mut lg) = log_ref.lock() { lg.push(format!("[Scan] {}", summary)); }
-                            if let Ok(mut s) = summary_ref.lock() { *s = summary; }
-                            if let Ok(mut dv) = devices_ref.lock() { *dv = devices; }
-                        }
-                        Err(e) => {
-                            let msg = format!("Scan error: {:?}", e);
-                            if let Ok(mut lg) = log_ref.lock() { lg.push(format!("[Scan] {}", msg)); }
-                            if let Ok(mut s) = summary_ref.lock() { *s = msg; }
-                        }
-                        _ => {}
-                    }
-                });
+                self.refresh_devices();
             }
         });
 

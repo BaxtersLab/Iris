@@ -2437,6 +2437,7 @@ dependencies = [
  "global-hotkey",
  "hyper",
  "iris-capture",
+ "iris-control",
  "iris-core",
  "iris-hal",
  "iris-hrt",

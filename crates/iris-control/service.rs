@@ -166,7 +166,27 @@ impl<B: UvcBackend> ControlService<B> {
     }
 
     /// Run until told to stop, or until every handle is dropped.
+    ///
+    /// Opens the device first. `list_controls` works on a freshly opened node,
+    /// but `get_control`/`set_control` require the backend to be holding the
+    /// device — without this, listing succeeds, every current value silently
+    /// falls back to the driver's default, and every write fails with
+    /// `DeviceNotOpen`. That combination looks like a camera with unresponsive
+    /// controls rather than like a service that never opened it.
+    ///
+    /// A failure to open is **not** fatal: the camera may be held by another
+    /// process, and reporting that per-operation is more useful than refusing
+    /// to start. It is logged loudly because it explains every later error.
     pub async fn run(mut self) {
+        match self.backend.open_device(&self.device).await {
+            Ok(()) => tracing::info!("control service opened {}", self.device),
+            Err(e) => tracing::warn!(
+                "control service could not open {} ({e}); \
+                 controls will list but reads and writes will fail",
+                self.device
+            ),
+        }
+
         while let Some(cmd) = self.cmd_rx.recv().await {
             match cmd {
                 ControlCommand::GetControl { control, reply } => {
@@ -218,6 +238,13 @@ impl<B: UvcBackend> ControlService<B> {
                 }
                 ControlCommand::Shutdown => break,
             }
+        }
+
+        // Release the device so a later service — or another process — can
+        // take it. Dropping the backend would do it, but only once every clone
+        // is gone, and the capture path may still hold one.
+        if let Err(e) = self.backend.close_device(&self.device).await {
+            tracing::debug!("control service could not close {}: {e}", self.device);
         }
     }
 
