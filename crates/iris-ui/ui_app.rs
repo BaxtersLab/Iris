@@ -29,6 +29,28 @@ pub fn truncate_log_line(line: &str) -> String {
     format!("{cut}…")
 }
 
+/// Flip an RGBA image left-to-right, in place.
+///
+/// The preview's counterpart to `iris_capture::snapshot::mirror_rgb24`. Two
+/// implementations because the paths carry different layouts — the preview is
+/// RGBA for egui, the agent's frame is RGB24 on its way to a JPEG — and
+/// converting between them to share a dozen lines would cost more than it saves.
+pub fn mirror_rgba(rgba: &mut [u8], width: usize, height: usize) {
+    if width < 2 || height == 0 || rgba.len() < width * height * 4 {
+        return;
+    }
+    for row in 0..height {
+        let base = row * width * 4;
+        for x in 0..width / 2 {
+            let a = base + x * 4;
+            let b = base + (width - 1 - x) * 4;
+            for c in 0..4 {
+                rgba.swap(a + c, b + c);
+            }
+        }
+    }
+}
+
 /// Frames taken off the capture channel in a single repaint, at most.
 ///
 /// The UI thread must never do work proportional to how far behind it has
@@ -255,6 +277,11 @@ pub struct IrisApp {
     /// operator can only act on the difference if it is stated.
     controls_error: Arc<Mutex<Option<String>>>,
     control: Option<iris_control::ControlHandle>,
+    /// Mirror the image left-to-right. Shared with the IPC and HTTP frame
+    /// paths, so the toggle changes what an agent receives and not merely what
+    /// the window draws — the reason to flip is that a model cannot read
+    /// mirrored text.
+    mirror: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl IrisApp {
@@ -262,6 +289,7 @@ impl IrisApp {
         ipc: Arc<IpcHandle>,
         capture: CaptureHandle,
         control: Option<iris_control::ControlHandle>,
+        mirror: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         let telemetry_rx = ipc.subscribe_telemetry();
         let app = Self {
@@ -284,6 +312,7 @@ impl IrisApp {
             controls: Arc::new(Mutex::new(None)),
             controls_error: Arc::new(Mutex::new(None)),
             control,
+            mirror,
         };
 
         // fetch initial device list and auto-select the first device if present
@@ -703,6 +732,27 @@ impl eframe::App for IrisApp {
                     self.refresh_devices();
                 }
 
+                ui.separator();
+
+                // Shown pressed while active: a toggle whose state is invisible
+                // is one you check by experiment.
+                let mirrored = self.mirror.load(std::sync::atomic::Ordering::Relaxed);
+                let mut mirror_button = egui::Button::new("⇄ Mirror");
+                if mirrored {
+                    mirror_button = mirror_button.fill(Color32::from_rgb(76, 175, 80));
+                }
+                let mirror_resp = ui.add(mirror_button).on_hover_text(
+                    "Flip left-to-right — for text held up to the camera.\n\
+                     Applies to what an agent receives, not just this preview.",
+                );
+                if mirror_resp.clicked() {
+                    self.mirror
+                        .store(!mirrored, std::sync::atomic::Ordering::Relaxed);
+                    if let Ok(mut lg) = self.log.lock() {
+                        lg.push(format!("[Mirror] {}", if !mirrored { "on" } else { "off" }));
+                    }
+                }
+
                 // Settings sits at the FAR RIGHT of the strip. right_to_left
                 // lays out from the right edge, so this stays pinned there as
                 // the window is resized rather than drifting with the buttons
@@ -880,7 +930,10 @@ impl eframe::App for IrisApp {
                 if let Some(frame) = drained.newest {
                     let w = frame.width as usize;
                     let h = frame.height as usize;
-                    let pixels = frame_to_rgba(&frame);
+                    let mut pixels = frame_to_rgba(&frame);
+                    if self.mirror.load(std::sync::atomic::Ordering::Relaxed) {
+                        mirror_rgba(&mut pixels, w, h);
+                    }
                     if pixels.len() == w * h * 4 {
                         self.frames_converted += 1;
                         let image = ColorImage::from_rgba_unmultiplied([w, h], &pixels);
@@ -1232,5 +1285,51 @@ mod log_line_tests {
         let out = truncate_log_line(&line);
         assert!(out.chars().count() <= 72);
         assert!(out.ends_with('…'));
+    }
+}
+
+#[cfg(test)]
+mod mirror_rgba_tests {
+    use super::mirror_rgba;
+
+    #[test]
+    fn each_row_is_reversed_independently() {
+        // 2x2 RGBA: row0 = [A,B], row1 = [C,D]. Reversing the BUFFER gives
+        // [D,C,B,A]; reversing each ROW gives [B,A,D,C].
+        let mut px = vec![
+            1, 1, 1, 255, 2, 2, 2, 255, // row 0
+            3, 3, 3, 255, 4, 4, 4, 255, // row 1
+        ];
+        mirror_rgba(&mut px, 2, 2);
+        assert_eq!(
+            px,
+            vec![2, 2, 2, 255, 1, 1, 1, 255, 4, 4, 4, 255, 3, 3, 3, 255]
+        );
+    }
+
+    #[test]
+    fn alpha_travels_with_its_pixel() {
+        let mut px = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        mirror_rgba(&mut px, 2, 1);
+        assert_eq!(px, vec![50, 60, 70, 80, 10, 20, 30, 40], "all four channels move together");
+    }
+
+    #[test]
+    fn flipping_twice_restores_the_image() {
+        let orig: Vec<u8> = (0..(5 * 3 * 4) as u8).collect();
+        let mut px = orig.clone();
+        mirror_rgba(&mut px, 5, 3);
+        assert_ne!(px, orig, "an odd width must still change");
+        mirror_rgba(&mut px, 5, 3);
+        assert_eq!(px, orig);
+    }
+
+    /// A short buffer must not be indexed past its end — the preview conversion
+    /// can legitimately return one when a frame is truncated.
+    #[test]
+    fn a_short_buffer_is_left_alone() {
+        let mut px = vec![1, 2, 3, 4];
+        mirror_rgba(&mut px, 8, 8);
+        assert_eq!(px, vec![1, 2, 3, 4]);
     }
 }

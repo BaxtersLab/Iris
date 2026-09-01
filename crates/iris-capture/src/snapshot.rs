@@ -161,6 +161,29 @@ pub fn downscale_rgb24(
     (dst_w, dst_h, out)
 }
 
+/// Flip an RGB24 image left-to-right, in place.
+///
+/// Webcams commonly present a mirrored "selfie" view, which puts any text held
+/// up to the camera backwards. Flipping matters most for the **model**, not the
+/// window: a person can tilt their head, but a vision model handed mirrored
+/// text reads mirrored text.
+pub fn mirror_rgb24(rgb: &mut [u8], width: u32, height: u32) {
+    let (w, h) = (width as usize, height as usize);
+    if w < 2 || h == 0 || rgb.len() < w * h * 3 {
+        return;
+    }
+    for row in 0..h {
+        let base = row * w * 3;
+        for x in 0..w / 2 {
+            let a = base + x * 3;
+            let b = base + (w - 1 - x) * 3;
+            for c in 0..3 {
+                rgb.swap(a + c, b + c);
+            }
+        }
+    }
+}
+
 /// Base64, RFC 4648 standard alphabet with padding.
 ///
 /// Hand-written rather than depending on a crate: it is thirty lines of
@@ -200,9 +223,16 @@ pub fn snapshot(
     frame: &CaptureFrame,
     max_width: u32,
     quality: u8,
+    mirror: bool,
 ) -> Result<Snapshot, SnapshotError> {
     let (w, h, rgb) = to_rgb24(frame)?;
-    let (dw, dh, scaled) = downscale_rgb24(&rgb, w, h, max_width);
+    let (dw, dh, mut scaled) = downscale_rgb24(&rgb, w, h, max_width);
+    if mirror {
+        // After downscaling, so the flip costs a fraction of the pixels — and
+        // a horizontal flip commutes with a box downscale, so the result is
+        // identical either way.
+        mirror_rgb24(&mut scaled, dw, dh);
+    }
 
     let mut jpeg = Vec::new();
     let encoder = jpeg_encoder::Encoder::new(&mut jpeg, quality.clamp(1, 100));
@@ -227,7 +257,7 @@ pub fn snapshot(
 mod tests {
     use super::*;
 
-    fn frame(w: u32, h: u32, format: PixelFormat, data: Vec<u8>) -> CaptureFrame {
+    pub(super) fn frame(w: u32, h: u32, format: PixelFormat, data: Vec<u8>) -> CaptureFrame {
         CaptureFrame {
             sequence: 1,
             width: w,
@@ -337,7 +367,7 @@ mod tests {
                 data.extend_from_slice(&[(x * 4) as u8, (y * 8) as u8, 128]);
             }
         }
-        let snap = snapshot(&frame(w, h, PixelFormat::Rgb24, data), 32, 80).expect("snapshot");
+        let snap = snapshot(&frame(w, h, PixelFormat::Rgb24, data), 32, 80, false).expect("snapshot");
         assert_eq!(snap.width, 32);
         assert_eq!(snap.height, 16);
         assert_eq!(snap.mime, "image/jpeg");
@@ -356,7 +386,7 @@ mod tests {
     #[test]
     fn the_encoded_bytes_are_a_real_jpeg() {
         let data = vec![200u8; 16 * 16 * 3];
-        let snap = snapshot(&frame(16, 16, PixelFormat::Rgb24, data), 0, 90).expect("snapshot");
+        let snap = snapshot(&frame(16, 16, PixelFormat::Rgb24, data), 0, 90, false).expect("snapshot");
         // Decode our own base64 back and check the markers.
         let bytes = {
             const A: &[u8; 64] =
@@ -382,25 +412,25 @@ mod tests {
     #[test]
     fn bgr_frames_have_their_channels_swapped() {
         // One pure-red pixel expressed as BGR.
-        let snap = snapshot(&frame(1, 1, PixelFormat::Bgr24, vec![0, 0, 255]), 0, 95)
+        let snap = snapshot(&frame(1, 1, PixelFormat::Bgr24, vec![0, 0, 255]), 0, 95, false)
             .expect("snapshot");
         assert_eq!((snap.width, snap.height), (1, 1));
     }
 
     #[test]
     fn a_truncated_frame_is_reported_not_guessed() {
-        let err = snapshot(&frame(64, 64, PixelFormat::Rgb24, vec![1, 2, 3]), 0, 80).unwrap_err();
+        let err = snapshot(&frame(64, 64, PixelFormat::Rgb24, vec![1, 2, 3]), 0, 80, false).unwrap_err();
         assert!(matches!(err, SnapshotError::Truncated { .. }), "{err}");
     }
 
     #[test]
     fn empty_and_zero_sized_frames_are_refused() {
         assert!(matches!(
-            snapshot(&frame(4, 4, PixelFormat::Rgb24, vec![]), 0, 80).unwrap_err(),
+            snapshot(&frame(4, 4, PixelFormat::Rgb24, vec![]), 0, 80, false).unwrap_err(),
             SnapshotError::Empty
         ));
         assert!(matches!(
-            snapshot(&frame(0, 4, PixelFormat::Rgb24, vec![1]), 0, 80).unwrap_err(),
+            snapshot(&frame(0, 4, PixelFormat::Rgb24, vec![1]), 0, 80, false).unwrap_err(),
             SnapshotError::ZeroSized(0, 4)
         ));
     }
@@ -411,12 +441,75 @@ mod tests {
     #[test]
     fn an_mjpeg_frame_decodes_and_re_encodes() {
         const TINY: &[u8] = include_bytes!("../tests/fixtures/tiny16.jpg");
-        let snap = snapshot(&frame(999, 999, PixelFormat::Mjpeg, TINY.to_vec()), 0, 85)
+        let snap = snapshot(&frame(999, 999, PixelFormat::Mjpeg, TINY.to_vec()), 0, 85, false)
             .expect("snapshot");
         assert_eq!(
             (snap.width, snap.height),
             (16, 16),
             "the decoder's geometry must win over the frame header"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::*;
+    use super::tests::frame;
+
+    #[test]
+    fn mirroring_reverses_each_row() {
+        // 3x1: red, green, blue
+        let mut px = vec![255, 0, 0, 0, 255, 0, 0, 0, 255];
+        mirror_rgb24(&mut px, 3, 1);
+        assert_eq!(px, vec![0, 0, 255, 0, 255, 0, 255, 0, 0], "row reversed");
+    }
+
+    #[test]
+    fn mirroring_twice_is_the_original() {
+        let orig: Vec<u8> = (0..(7 * 5 * 3) as u8).collect();
+        let mut px = orig.clone();
+        mirror_rgb24(&mut px, 7, 5);
+        assert_ne!(px, orig, "an odd width must still change");
+        mirror_rgb24(&mut px, 7, 5);
+        assert_eq!(px, orig, "flipping twice restores the image");
+    }
+
+    #[test]
+    fn rows_are_flipped_independently_not_the_whole_buffer() {
+        // 2x2: row0 = [A,B], row1 = [C,D]. Reversing the BUFFER would give
+        // [D,C,B,A]; reversing each ROW gives [B,A,D,C].
+        let mut px = vec![1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4];
+        mirror_rgb24(&mut px, 2, 2);
+        assert_eq!(px, vec![2, 2, 2, 1, 1, 1, 4, 4, 4, 3, 3, 3]);
+    }
+
+    #[test]
+    fn degenerate_sizes_are_left_alone() {
+        let mut one = vec![9, 9, 9];
+        mirror_rgb24(&mut one, 1, 1);
+        assert_eq!(one, vec![9, 9, 9], "a single column has nothing to swap");
+        let mut short = vec![1, 2, 3];
+        mirror_rgb24(&mut short, 8, 8);
+        assert_eq!(short, vec![1, 2, 3], "a buffer too small must not be indexed");
+    }
+
+    /// The point of the feature: a mirrored capture of text comes back readable.
+    #[test]
+    fn a_mirrored_frame_round_trips_through_snapshot() {
+        let (w, h) = (8u32, 4u32);
+        let mut data = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                // A left-heavy gradient, so a flip is detectable.
+                data.extend_from_slice(&[(x * 30) as u8, (y * 60) as u8, 0]);
+            }
+        }
+        let f = frame(w, h, PixelFormat::Rgb24, data);
+        let plain = snapshot(&f, 0, 90, false).expect("plain");
+        let flipped = snapshot(&f, 0, 90, true).expect("mirrored");
+        assert_ne!(
+            plain.base64, flipped.base64,
+            "mirroring must change the encoded image"
         );
     }
 }

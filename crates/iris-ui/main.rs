@@ -69,6 +69,7 @@ async fn main() {
             let ipc = std::sync::Arc::new(rt.ipc_handle);
             let capture_handle = rt.capture_handle;
             let control_handle = rt.control_handle;
+            let mirror = rt.mirror;
 
             // If headless mode is requested, run a scripted interaction sequence and exit.
             if std::env::var("IRIS_UI_HEADLESS").unwrap_or_default() == "1" {
@@ -182,6 +183,7 @@ async fn main() {
                         ipc.clone(),
                         capture_handle,
                         control_handle.clone(),
+                        mirror.clone(),
                     ))
                 }),
             );

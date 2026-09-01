@@ -27,6 +27,13 @@ pub struct IrisRuntime {
     pub app_state: Arc<AppState>,
     pub ipc_handle: IpcHandle,
     pub capture_handle: CaptureHandle,
+    /// Mirror the image left-to-right.
+    ///
+    /// Shared, not per-consumer: a webcam's mirrored view puts text held up to
+    /// it backwards, and the reason to flip is so the **model** can read it.
+    /// A toggle that only flipped the window would look like it worked and
+    /// change nothing about what the agent receives.
+    pub mirror: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Frame fan-out. **Held for the lifetime of the runtime on purpose.**
     ///
     /// `StreamService::run` exits when its command channel closes, which
@@ -53,6 +60,8 @@ pub struct IrisRuntime {
 /// Minimal dispatcher implemented inside `iris-ui` that implements the `iris-ipc::Dispatcher` trait.
 pub struct IrisDispatcher {
     capture_cmd: MpscSender<CaptureCommand>,
+    /// Shared mirror flag, so `GetFrame` matches what the window shows.
+    mirror: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The newest frames, for `GetFrame`.
     ///
     /// The stream service maintains this in every mode, so an agent can ask
@@ -65,8 +74,13 @@ impl IrisDispatcher {
     pub fn new(
         capture_cmd: MpscSender<CaptureCommand>,
         frames: iris_stream::SharedRingBuffer,
+        mirror: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
-        Self { capture_cmd, frames }
+        Self {
+            capture_cmd,
+            frames,
+            mirror,
+        }
     }
 }
 
@@ -77,6 +91,7 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
     ) -> Pin<Box<dyn Future<Output = IpcResponse> + Send>> {
         let cmd_sender = self.capture_cmd.clone();
         let frames = self.frames.clone();
+        let mirror = self.mirror.clone();
         Box::pin(async move {
             use iris_ipc::command::IpcCommand;
             match cmd {
@@ -225,6 +240,7 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                                 &frame,
                                 max_width.unwrap_or(DEFAULT_MAX_WIDTH),
                                 quality.unwrap_or(DEFAULT_QUALITY),
+                                mirror.load(std::sync::atomic::Ordering::Relaxed),
                             ) {
                                 Ok(snap) => IpcResponse::Ok(ResponseData::Frame {
                                     sequence: slot.sequence,
@@ -586,6 +602,9 @@ impl IrisRuntime {
             );
         }
         let frames_ring = stream_handle.ring_buffer.clone();
+        // One flag, shared by the window, the IPC dispatcher and the HTTP
+        // endpoint, so a mirror toggled in the UI is the image the agent gets.
+        let mirror = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         tokio::spawn(stream_service.run());
         println!(
             "StreamService: {} mode, ring {} frames, up to {} subscribers",
@@ -611,7 +630,7 @@ impl IrisRuntime {
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
 
         // 5. Dispatcher
-        let dispatcher = IrisDispatcher::new(cmd_tx.clone(), frames_ring.clone());
+        let dispatcher = IrisDispatcher::new(cmd_tx.clone(), frames_ring.clone(), mirror.clone());
 
         // 6. Spawn services
         let mut tasks = Vec::new();
@@ -629,12 +648,16 @@ impl IrisRuntime {
             // named pipe, a bespoke framing) would be a worse interface for the
             // one caller it has, and this listener is already here.
             let http_frames = frames_ring.clone();
+        let http_mirror = mirror.clone();
             let svc = make_service_fn(move |_conn| {
                 let http_frames = http_frames.clone();
+                let http_mirror = http_mirror.clone();
                 async move {
                     let http_frames = http_frames.clone();
+                    let http_mirror = http_mirror.clone();
                     Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
                         let http_frames = http_frames.clone();
+                        let http_mirror = http_mirror.clone();
                         async move {
                     match req.uri().path() {
                         "/frame" => {
@@ -710,8 +733,17 @@ impl IrisRuntime {
                                         timestamp_us: slot.timestamp_us,
                                         is_cropped: false,
                                     };
+                                    // The window's toggle, unless the caller
+                                    // overrides it for this one request.
+                                    let mirror = param("mirror")
+                                        .map(|v| v != 0)
+                                        .unwrap_or_else(|| {
+                                            http_mirror.load(
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            )
+                                        });
                                     match iris_capture::snapshot::snapshot(
-                                        &frame, max_width, quality,
+                                        &frame, max_width, quality, mirror,
                                     ) {
                                         Ok(snap) => (
                                             200,
@@ -719,7 +751,7 @@ impl IrisRuntime {
                                                 concat!(
                                                     "{{\"sequence\":{},\"width\":{},",
                                                     "\"height\":{},\"captured_us\":{},",
-                                                    "\"age_ms\":{},",
+                                                    "\"age_ms\":{},\"mirrored\":{},",
                                                     "\"mime\":\"{}\",\"data_url\":\"{}\"}}"
                                                 ),
                                                 slot.sequence,
@@ -727,6 +759,7 @@ impl IrisRuntime {
                                                 snap.height,
                                                 slot.timestamp_us,
                                                 age_ms.unwrap_or(0),
+                                                mirror,
                                                 snap.mime,
                                                 snap.data_url()
                                             ),
@@ -1024,6 +1057,7 @@ impl IrisRuntime {
             ipc_handle,
             capture_handle,
             stream_handle,
+            mirror,
             control_handle,
             _tasks: tasks,
             _capture_telemetry_tx: capture_telemetry_tx.clone(),

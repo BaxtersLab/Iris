@@ -14,6 +14,8 @@ curl -s 'http://127.0.0.1:9180/frame?max_width=768'
   "width": 512,
   "height": 288,
   "captured_us": 1756759123456789,
+  "age_ms": 27,
+  "mirrored": false,
   "mime": "image/jpeg",
   "data_url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ..."
 }
@@ -53,6 +55,7 @@ framing to implement.
 | `max_width` | `768` | Downscale so the image is at most this wide, preserving aspect ratio. `0` disables scaling. Never upscales. |
 | `quality` | `80` | JPEG quality, 1–100. |
 | `max_age_ms` | `10000` | Refuse a frame older than this. `0` disables the check. |
+| `mirror` | the window's toggle | `1` flips left-to-right, `0` does not. Omit to follow the Mirror button. |
 
 **Why 768 by default.** A vision projector works on tiles a few hundred pixels
 square. Handing it 1920x1080 costs encode time, transfer size and tokens to
@@ -70,6 +73,17 @@ a reason; the camera's full resolution is always available with `max_width=0`.
 Every successful answer carries **`age_ms`** — how old the frame was when it was
 served, computed here so no caller has to reason about clock skew. `captured_us`
 is the absolute capture time if you want it.
+
+### On mirroring
+
+Webcams commonly present a mirrored "selfie" view, which puts **text held up to
+the camera backwards**. The Mirror button on the window's control strip flips
+the image, and it flips **what this endpoint returns as well** — the reason to
+flip is so a model can read the text, so a toggle that only changed the preview
+would look like it worked and change nothing that matters.
+
+Each response reports `mirrored`, and a request can override the toggle for one
+call with `?mirror=1` or `?mirror=0` without disturbing the window.
 
 ### On staleness
 
