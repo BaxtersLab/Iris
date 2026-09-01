@@ -49,6 +49,19 @@ pub enum CaptureCommand {
 }
 
 impl CaptureHandle {
+    /// Swap the frame receiver, returning the previous one.
+    ///
+    /// Exists so the stream service can be inserted between capture and the
+    /// window: it takes the raw receiver, and the window is handed a
+    /// subscription in its place. The handle's command channel and counters
+    /// still belong to the capture service, so only this one field moves.
+    pub fn swap_frame_rx(
+        &mut self,
+        rx: mpsc::Receiver<CaptureFrame>,
+    ) -> mpsc::Receiver<CaptureFrame> {
+        std::mem::replace(&mut self.frame_rx, rx)
+    }
+
     pub async fn send(&self, cmd: CaptureCommand) -> IrisResult<()> {
         self.cmd_tx
             .send(cmd)

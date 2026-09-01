@@ -19,6 +19,8 @@ iris-ipc = { path = "../iris-ipc" }
 tracing = { workspace = true }
 chrono = { workspace = true }
 zune-jpeg = "0.5.15"
+thiserror = { workspace = true }
+jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.54", features = [

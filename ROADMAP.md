@@ -165,12 +165,13 @@ contribute **zero tests** — a question a green workspace total cannot answer.
       reason, and settable directly by name. Making it toggleable needs a
       per-driver menu-semantics map, which is a research task, not an oversight.
 
-- [ ] GAP: `iris-control` is **not yet wired into `iris-ui`**. The crate is
-      real, tested and usable, but nothing constructs a `ControlService` at
-      startup and no UI surfaces it — that is integration (block I-1), and it
-      needs UI design decisions about where controls live in the window. Until
-      then the controls are reachable from code and from the HAL, not from the
-      application.
+- [x] **DONE 2026-09-01** — ~~GAP: `iris-control` is not yet wired into
+      `iris-ui`~~. The settings panel behind the strip's gear lists the camera's
+      real controls as sliders built from the driver's own range and step, and
+      re-reads after each write so the panel shows what the camera took rather
+      than what was asked for. Sliders snap with `clamp_value` before sending,
+      because `set_control` refuses an off-grid value and a slider that can
+      produce a rejection is one that sometimes silently does nothing.
 
 - [x] **DONE 2026-08-31** — ~~STUB: `iris-stream`~~. Built as four modules:
       `mode`, `ring_buffer`, `subscriber`, `service`. **17 tests**, three
@@ -207,11 +208,33 @@ contribute **zero tests** — a question a green workspace total cannot answer.
       needs a mapped region and a cross-process protocol; that is what the
       `SharedMemory` mode would be, and none of it exists.
 
-- [ ] GAP: `iris-stream` is **not yet wired into `iris-ui`**, the same as
-      `iris-control`. `iris.toml`'s `stream.default_mode` and
-      `stream.ring_buffer_capacity` are still read by nothing — a config knob
-      nothing parses, which this session fixed for `capture.*` and has not for
-      `stream.*`. Wiring both crates in is block I-1 and needs UI decisions.
+- [x] **DONE 2026-09-01** — ~~GAP: `iris-stream` is not wired into `iris-ui`~~.
+      It now sits **between capture and everything that wants frames**, which is
+      what lets there be more than one such thing: the window is an ordinary
+      push subscriber, and the ring is the pull surface an agent reads.
+      `stream.default_mode`, `stream.ring_buffer_capacity` and
+      `stream.max_subscribers` are read. The default changed `pull` → `push`,
+      because a running Iris has a window and a window is a subscriber; `pull`
+      fans out to nobody, which is right for a headless agent-only run and an
+      empty preview in a windowed one. Configuring `pull` is honoured and warned
+      about rather than overridden.
+
+      Two findings from the wiring:
+
+      * **The ring is now maintained in every mode.** Making it conditional on
+        `Pull` meant a window (push) and an agent (pull) could not both be
+        served, which is the ordinary case rather than an exotic one.
+      * **`RingSlot` dropped the pixel format**, which made every stored frame
+        ambiguous the moment anything but the window read one — the same buffer
+        is a JPEG, a plane pair or an RGB grid depending on it.
+
+- [x] **DONE 2026-09-01** — agent vision endpoint. `GET /frame` on the existing
+      metrics listener returns the newest frame as a downscaled JPEG in a
+      complete `data:` URL, ready for an OpenAI-format `image_url`. Served over
+      HTTP rather than a new transport because the consumer — a local llama.cpp
+      model with an mmproj — already speaks HTTP and JSON, and giving its one
+      caller a second protocol to learn would be the worse interface.
+      See `docs/AGENT_VISION.md`.
 
 - [x] **DONE 2026-08-31** — ~~GAP: `iris-ipc-pipe-bridge` is not a Cargo
       workspace member~~. It carried an empty `[workspace]` table making it its

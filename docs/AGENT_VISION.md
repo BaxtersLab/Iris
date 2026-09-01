@@ -1,0 +1,107 @@
+# Giving an agent eyes
+
+Iris exists so an agent can **see outside the box**. This is how it asks.
+
+One HTTP request, one JPEG, ready to drop into an OpenAI-format vision message.
+
+```bash
+curl -s 'http://127.0.0.1:9180/frame?max_width=768'
+```
+
+```json
+{
+  "sequence": 151,
+  "width": 512,
+  "height": 288,
+  "captured_us": 1756759123456789,
+  "mime": "image/jpeg",
+  "data_url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ..."
+}
+```
+
+`data_url` is the **complete** string for `image_url.url`. It is assembled by
+Iris rather than by each caller, because a caller building it by hand can get
+the MIME type or the base64 padding wrong silently — and the only symptom is a
+model that reports seeing nothing.
+
+## Straight into llama.cpp
+
+```python
+import requests
+
+frame = requests.get("http://127.0.0.1:9180/frame?max_width=768").json()
+
+requests.post("http://127.0.0.1:8080/v1/chat/completions", json={
+    "model": "local",
+    "messages": [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "What is in front of the camera?"},
+            {"type": "image_url", "image_url": {"url": frame["data_url"]}},
+        ],
+    }],
+})
+```
+
+That is the whole integration. No client library, no second transport, no
+framing to implement.
+
+## Parameters
+
+| query | default | meaning |
+|---|---|---|
+| `max_width` | `768` | Downscale so the image is at most this wide, preserving aspect ratio. `0` disables scaling. Never upscales. |
+| `quality` | `80` | JPEG quality, 1–100. |
+
+**Why 768 by default.** A vision projector works on tiles a few hundred pixels
+square. Handing it 1920x1080 costs encode time, transfer size and tokens to
+reach the same tiles it would have produced anyway. Ask for more when you have
+a reason; the camera's full resolution is always available with `max_width=0`.
+
+## Responses
+
+| status | meaning |
+|---|---|
+| `200` | A frame. `sequence` increases per captured frame — compare it to tell a fresh frame from one you already have. |
+| `503` | Nothing captured yet. Iris is running but capture has not produced a frame; start capture. |
+| `500` | The frame could not be converted. The message says why. |
+
+`captured_us` is microseconds since the epoch, so a caller can decide whether a
+frame is too old to act on — which matters for anything reactive.
+
+## What this is not
+
+**It is a pull, not a stream.** Ask when you want to look. There is no
+subscription and no push over HTTP, because the consumer this was built for is
+a model that looks when it decides to, not thirty times a second. Frame fan-out
+to several *in-process* consumers exists (`iris-stream`), and a push transport
+to another process does not — that is declared in `ROADMAP.md` rather than
+half-built.
+
+**Iris does no inference.** It hands over pixels and says nothing about what is
+in them. *Iris is a tool, not a brain.*
+
+## Where the frame comes from
+
+```
+camera ──▶ CaptureService ──▶ StreamService ──┬──▶ ring buffer ──▶ /frame
+                                              └──▶ subscribers ──▶ the window
+```
+
+The ring is maintained whatever the stream mode, so `/frame` answers whether or
+not anything else is watching — including with the window closed and the app
+running headless.
+
+## Binding elsewhere
+
+The listener is `127.0.0.1:9180`, shared with `/metrics`. Change it with
+`METRICS_BIND`:
+
+```bash
+METRICS_BIND=127.0.0.1:9500 ./run.sh
+```
+
+**Loopback by default, deliberately.** This endpoint serves a live camera. It
+has no authentication, so binding it to a routable address puts the room on the
+network. If you need that, put a reverse proxy with auth in front rather than
+changing the bind address.

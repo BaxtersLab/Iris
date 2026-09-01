@@ -117,7 +117,11 @@ impl Default for ControlsConfig {
 impl Default for StreamConfig {
     fn default() -> Self {
         Self {
-            default_mode: "pull".to_string(),
+            // "push", because a running Iris has a window, and the window is
+            // a subscriber. "pull" fans out to nobody — correct for a headless,
+            // agent-only deployment, and an empty preview in a windowed one.
+            // The frame ring an agent reads is maintained in either mode.
+            default_mode: "push".to_string(),
             ring_buffer_capacity: 8,
             max_subscribers: 4,
             ipc_pipe_name: "\\\\.\\pipe\\iris-stream".to_string(),

@@ -62,6 +62,21 @@ pub enum IpcCommand {
         subscriber_id: u64,
     },
     GetStreamStats,
+    /// "What do you see right now?" — the newest captured frame, prepared for
+    /// a vision model.
+    ///
+    /// Pull rather than push on purpose: the consumer this exists for is a
+    /// local llama.cpp model with an mmproj, which looks when it decides to,
+    /// not thirty times a second.
+    GetFrame {
+        /// Downscale so the longest edge is at most this wide. `None` uses a
+        /// default suited to a vision projector; `Some(0)` disables scaling.
+        #[serde(default)]
+        max_width: Option<u32>,
+        /// JPEG quality 1-100. `None` uses the default.
+        #[serde(default)]
+        quality: Option<u8>,
+    },
 
     ReloadConfig,
     GetConfig,

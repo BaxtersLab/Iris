@@ -51,6 +51,16 @@ impl FrameSubscription {
     pub fn try_next_frame(&mut self) -> Option<CaptureFrame> {
         self.frame_rx.try_recv().ok()
     }
+
+    /// Unwrap to the bare receiver.
+    ///
+    /// For a consumer that already drains an `mpsc::Receiver<CaptureFrame>` —
+    /// the UI does — so that becoming a subscriber costs it no changes.
+    /// Dropping the receiver still closes the channel, which is how the service
+    /// notices the subscriber has gone.
+    pub fn into_receiver(self) -> mpsc::Receiver<CaptureFrame> {
+        self.frame_rx
+    }
 }
 
 /// Per-subscriber counters, reported by `GetStats`.

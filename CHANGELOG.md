@@ -15,6 +15,29 @@ crate version disagree.
 
 Unreleased
 ----------
+An agent can see — 2026-09-01
+- **`GET /frame`** on the existing metrics listener returns the newest camera
+  frame as a downscaled JPEG in a complete `data:image/jpeg;base64,...` URL,
+  ready to drop into an OpenAI-format `image_url`. One request, no client
+  library, no second transport — the consumer is a local llama.cpp model with an
+  mmproj, which already speaks HTTP and JSON. `docs/AGENT_VISION.md`.
+- Defaults to 768px wide because a vision projector tiles a few hundred pixels
+  square; 1080p costs encode time, transfer and tokens to reach the same tiles.
+  `max_width=0` gives the camera's full resolution.
+- Downscaling averages the source pixels rather than point-sampling. Dropping
+  1920 to 512 by taking every fourth pixel aliases text and thin edges into
+  noise, and a vision model reads that noise.
+- Base64 is hand-written against RFC 4648's own test vectors rather than taken
+  as a dependency — thirty lines of well-specified transformation in a project
+  that documents every dependency it has.
+- **`iris-stream` is now wired in**, between capture and everything that wants
+  frames: the window is an ordinary subscriber and the ring is the pull surface
+  `/frame` reads. `stream.*` config is finally read. Default `pull` -> `push`,
+  since a running Iris has a window and a window is a subscriber.
+- Two defects found by wiring it: the ring only filled in `Pull` mode, so a
+  window and an agent could not both be served; and `RingSlot` dropped the pixel
+  format, making every stored frame ambiguous to anything but the window.
+
 An application icon — 2026-09-01
 - Iris had no artwork at all; the desktop entry pointed at the generic themed
   `camera-web`. It now has its own: a blue square with white lowercase "iris",

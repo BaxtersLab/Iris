@@ -3,6 +3,7 @@ pub mod backend;
 pub mod dxgi_backend;
 pub mod frame;
 pub mod mjpeg;
+pub mod snapshot;
 pub mod service;
 pub mod telemetry;
 

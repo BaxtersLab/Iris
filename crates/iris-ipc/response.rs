@@ -10,6 +10,25 @@ pub enum IpcResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "payload")]
 pub enum ResponseData {
+    /// A captured frame, ready for an OpenAI-format vision request.
+    ///
+    /// `data_url` is the complete `data:image/jpeg;base64,...` string and drops
+    /// straight into `image_url.url`. It is assembled here rather than by each
+    /// caller because a caller building it by hand can get the MIME type or the
+    /// base64 padding wrong silently, and be told only that the model saw
+    /// nothing.
+    Frame {
+        /// Capture sequence number, so a caller can tell a fresh frame from a
+        /// repeat of one it already has.
+        sequence: u64,
+        /// Geometry AFTER downscaling.
+        width: u32,
+        height: u32,
+        /// Capture time in microseconds since the epoch, for staleness checks.
+        captured_us: u64,
+        mime: String,
+        data_url: String,
+    },
     Empty,
     Pong {
         uptime_ms: u64,

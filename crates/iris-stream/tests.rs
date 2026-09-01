@@ -295,3 +295,39 @@ async fn the_service_stops_when_the_frame_source_closes() {
         .expect("the subscription must close, not hang");
     assert!(got.is_none(), "a closed source must end the subscription");
 }
+
+/// The ring is the "what do you see right now" surface, so it must be filled
+/// whatever the mode. Making it conditional on Pull meant a UI subscribed for
+/// push and an agent asking for the current frame could not both be served —
+/// which is the ordinary case, not an exotic one.
+#[tokio::test]
+async fn the_ring_is_filled_in_push_mode_too() {
+    let h = harness(StreamMode::Push, 4, 8);
+    let mut sub = h.handle.subscribe().await.expect("subscribe");
+    h.frame_tx.send(frame(7, 3)).await.expect("send");
+
+    let pushed = tokio::time::timeout(std::time::Duration::from_secs(2), sub.next_frame())
+        .await
+        .expect("push must still work")
+        .expect("a frame");
+    assert_eq!(pushed.sequence, 7, "the subscriber still receives");
+
+    let rb = h.handle.ring_buffer.lock().expect("lock");
+    let latest = rb.read_latest().expect("the ring must hold it too");
+    assert_eq!(latest.sequence, 7, "a pull reader sees the same frame");
+    assert_eq!(latest.data[0], 3);
+}
+
+/// A frame's bytes are meaningless without its format — the same buffer is a
+/// JPEG, a plane pair or an RGB grid depending on it. The ring dropped it
+/// originally, which made every stored frame ambiguous to anything but the UI,
+/// and a reader that guesses will guess wrong on the camera that matters.
+#[test]
+fn the_ring_preserves_the_pixel_format() {
+    use iris_hal::device::PixelFormat;
+    let mut rb = RingBuffer::new(2);
+    let mut f = frame(1, 5);
+    f.format = PixelFormat::Mjpeg;
+    rb.write(&f);
+    assert_eq!(rb.read_latest().expect("a frame").format, PixelFormat::Mjpeg);
+}

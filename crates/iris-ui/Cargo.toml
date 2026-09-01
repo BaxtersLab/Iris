@@ -19,6 +19,7 @@ iris-hrt = { path = "../iris-hrt" }
 iris-hal = { path = "../iris-hal" }
 iris-capture = { path = "../iris-capture" }
 iris-control = { path = "../iris-control" }
+iris-stream = { path = "../iris-stream" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true }
 serde = { workspace = true }

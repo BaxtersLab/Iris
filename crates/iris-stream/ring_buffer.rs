@@ -11,10 +11,11 @@
 //! "shared-memory ring buffer for zero-copy frame delivery", which it is not.
 
 use iris_capture::frame::CaptureFrame;
+use iris_hal::device::PixelFormat;
 use std::sync::{Arc, Mutex};
 
 /// One frame's worth of the ring.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RingSlot {
     /// Frame sequence. **0 means empty** — the capture service numbers frames
     /// from 1, so zero is unambiguous.
@@ -22,7 +23,28 @@ pub struct RingSlot {
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// The pixel format of `data`.
+    ///
+    /// Stored because a frame's bytes are meaningless without it: the same
+    /// buffer is a JPEG, a plane pair or an RGB grid depending on this, and a
+    /// reader that has to guess will guess wrong on the camera that matters.
+    /// The ring originally dropped it, which made every stored frame ambiguous
+    /// the moment anything other than the UI wanted to read one.
+    pub format: PixelFormat,
     pub timestamp_us: u64,
+}
+
+impl Default for RingSlot {
+    fn default() -> Self {
+        Self {
+            sequence: 0,
+            data: Vec::new(),
+            width: 0,
+            height: 0,
+            format: PixelFormat::Rgb24,
+            timestamp_us: 0,
+        }
+    }
 }
 
 impl RingSlot {
@@ -65,6 +87,7 @@ impl RingBuffer {
         slot.data.extend_from_slice(&frame.data);
         slot.width = frame.width;
         slot.height = frame.height;
+        slot.format = frame.format.clone();
         slot.timestamp_us = frame.timestamp_us;
         self.write_idx = (self.write_idx + 1) % capacity;
         self.total_written += 1;

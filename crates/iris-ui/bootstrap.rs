@@ -27,6 +27,15 @@ pub struct IrisRuntime {
     pub app_state: Arc<AppState>,
     pub ipc_handle: IpcHandle,
     pub capture_handle: CaptureHandle,
+    /// Frame fan-out. **Held for the lifetime of the runtime on purpose.**
+    ///
+    /// `StreamService::run` exits when its command channel closes, which
+    /// happens as soon as the last handle drops. Letting this fall out of
+    /// scope at the end of `bootstrap` therefore killed the service the moment
+    /// startup finished: subscriber senders dropped, the window's receiver
+    /// reported "capture_rx closed", and the preview went blank while the
+    /// camera carried on capturing perfectly.
+    pub stream_handle: iris_stream::StreamHandle,
     /// Camera controls, when this platform has a backend for them.
     ///
     /// `None` on a platform with no UVC control backend — the UI then says so
@@ -44,11 +53,20 @@ pub struct IrisRuntime {
 /// Minimal dispatcher implemented inside `iris-ui` that implements the `iris-ipc::Dispatcher` trait.
 pub struct IrisDispatcher {
     capture_cmd: MpscSender<CaptureCommand>,
+    /// The newest frames, for `GetFrame`.
+    ///
+    /// The stream service maintains this in every mode, so an agent can ask
+    /// what the camera sees at any moment without the pipeline having been
+    /// configured in advance for a puller.
+    frames: iris_stream::SharedRingBuffer,
 }
 
 impl IrisDispatcher {
-    pub fn new(capture_cmd: MpscSender<CaptureCommand>) -> Self {
-        Self { capture_cmd }
+    pub fn new(
+        capture_cmd: MpscSender<CaptureCommand>,
+        frames: iris_stream::SharedRingBuffer,
+    ) -> Self {
+        Self { capture_cmd, frames }
     }
 }
 
@@ -58,6 +76,7 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
         cmd: iris_ipc::command::IpcCommand,
     ) -> Pin<Box<dyn Future<Output = IpcResponse> + Send>> {
         let cmd_sender = self.capture_cmd.clone();
+        let frames = self.frames.clone();
         Box::pin(async move {
             use iris_ipc::command::IpcCommand;
             match cmd {
@@ -173,6 +192,55 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                 IpcCommand::Subscribe => IpcResponse::Ok(ResponseData::SubscriberId { id: 1 }),
                 IpcCommand::Unsubscribe { subscriber_id: _ } => {
                     IpcResponse::Ok(ResponseData::Empty)
+                }
+                IpcCommand::GetFrame { max_width, quality } => {
+                    // Defaults chosen for a vision projector rather than for a
+                    // display: these models tile a few hundred pixels square,
+                    // so 1080p costs encode time, transfer and tokens to reach
+                    // the same tiles. 768 is a common upper bound across
+                    // llama.cpp mmproj builds.
+                    const DEFAULT_MAX_WIDTH: u32 = 768;
+                    const DEFAULT_QUALITY: u8 = 80;
+
+                    let latest = match frames.lock() {
+                        Ok(rb) => rb.read_latest().cloned(),
+                        Err(_) => None,
+                    };
+                    match latest {
+                        None => IpcResponse::Error {
+                            code: 404,
+                            message: "no frame captured yet — start capture first".into(),
+                        },
+                        Some(slot) => {
+                            let frame = iris_capture::frame::CaptureFrame {
+                                sequence: slot.sequence,
+                                width: slot.width,
+                                height: slot.height,
+                                format: slot.format.clone(),
+                                data: slot.data.clone(),
+                                timestamp_us: slot.timestamp_us,
+                                is_cropped: false,
+                            };
+                            match iris_capture::snapshot::snapshot(
+                                &frame,
+                                max_width.unwrap_or(DEFAULT_MAX_WIDTH),
+                                quality.unwrap_or(DEFAULT_QUALITY),
+                            ) {
+                                Ok(snap) => IpcResponse::Ok(ResponseData::Frame {
+                                    sequence: slot.sequence,
+                                    width: snap.width,
+                                    height: snap.height,
+                                    captured_us: slot.timestamp_us,
+                                    mime: snap.mime.to_string(),
+                                    data_url: snap.data_url(),
+                                }),
+                                Err(e) => IpcResponse::Error {
+                                    code: 500,
+                                    message: format!("snapshot failed: {e}"),
+                                },
+                            }
+                        }
+                    }
                 }
                 IpcCommand::GetStreamStats => IpcResponse::Ok(ResponseData::StreamStats {
                     frames_delivered: 0,
@@ -470,11 +538,80 @@ impl IrisRuntime {
             capture_telemetry_tx.clone(),
         );
 
+        // The stream service sits BETWEEN capture and everything that wants
+        // frames, which is what lets there be more than one such thing.
+        //
+        // Capture's channel has exactly one consumer. Before this, that
+        // consumer was the window, so a frame could be displayed or handed to
+        // an agent but not both. Now the window is an ordinary subscriber and
+        // the ring is the pull surface an agent reads through `GetFrame`.
+        //
+        // Push mode, because the window wants every frame as it arrives; the
+        // ring is maintained regardless of mode, so the agent's pull path does
+        // not depend on that choice.
+        let stream_mode: iris_stream::StreamMode = config
+            .stream
+            .default_mode
+            .parse()
+            .unwrap_or(iris_stream::StreamMode::Push);
+        let stream_mode = if stream_mode.is_implemented() {
+            stream_mode
+        } else {
+            eprintln!(
+                "stream.default_mode = {:?} is not implemented; using push",
+                config.stream.default_mode
+            );
+            iris_stream::StreamMode::Push
+        };
+        let mut capture_handle = capture_handle;
+        // Take the raw receiver out and leave a closed one behind; the window's
+        // real source is installed below once it has subscribed.
+        let (_placeholder_tx, placeholder_rx) = mpsc::channel(1);
+        let raw_frames = capture_handle.swap_frame_rx(placeholder_rx);
+        let (stream_service, stream_handle) = iris_stream::StreamService::new(
+            raw_frames,
+            telemetry_tx.clone(),
+            stream_mode,
+            config.stream.ring_buffer_capacity.max(2),
+            config.stream.max_subscribers.max(1),
+        );
+        if stream_mode == iris_stream::StreamMode::Pull {
+            // Not overridden — the config is honoured — but said plainly,
+            // because the symptom is a permanently empty preview with a
+            // perfectly healthy camera behind it.
+            eprintln!(
+                "stream.default_mode = \"pull\": frames go to the ring only, so the \
+                 window will show nothing. Use \"push\" for a windowed run; \
+                 \"pull\" suits a headless agent-only one."
+            );
+        }
+        let frames_ring = stream_handle.ring_buffer.clone();
+        tokio::spawn(stream_service.run());
+        println!(
+            "StreamService: {} mode, ring {} frames, up to {} subscribers",
+            stream_mode, config.stream.ring_buffer_capacity, config.stream.max_subscribers
+        );
+
+        // Hand the window a subscription in place of the raw capture channel.
+        let ui_frames = stream_handle
+            .subscribe()
+            .await
+            .map(|sub| sub.into_receiver());
+        match ui_frames {
+            Ok(rx) => {
+                capture_handle.swap_frame_rx(rx);
+            }
+            Err(e) => {
+                eprintln!("could not subscribe the UI to the stream service: {e}");
+                return Err(iris_core::error::IrisError::Stream(format!("{e}")));
+            }
+        }
+
         // create the capture command channel that will be used by the dispatcher
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
 
         // 5. Dispatcher
-        let dispatcher = IrisDispatcher::new(cmd_tx.clone());
+        let dispatcher = IrisDispatcher::new(cmd_tx.clone(), frames_ring.clone());
 
         // 6. Spawn services
         let mut tasks = Vec::new();
@@ -484,9 +621,87 @@ impl IrisRuntime {
         // Binding address can be configured via METRICS_BIND (default 127.0.0.1:9180).
         let metrics_bind = std::env::var("METRICS_BIND").unwrap_or_else(|_| "127.0.0.1:9180".to_string());
         if let Ok(addr) = metrics_bind.parse::<SocketAddr>() {
-            let svc = make_service_fn(|_conn| async move {
-                Ok::<_, Infallible>(service_fn(|req: Request<Body>| async move {
+            // `/frame` is served from the same listener as `/metrics`.
+            //
+            // The consumer this exists for is a local llama.cpp model driven
+            // through the OpenAI chat-completions API — which is HTTP and JSON
+            // already. Giving it a second transport to learn (a unix socket, a
+            // named pipe, a bespoke framing) would be a worse interface for the
+            // one caller it has, and this listener is already here.
+            let http_frames = frames_ring.clone();
+            let svc = make_service_fn(move |_conn| {
+                let http_frames = http_frames.clone();
+                async move {
+                    let http_frames = http_frames.clone();
+                    Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
+                        let http_frames = http_frames.clone();
+                        async move {
                     match req.uri().path() {
+                        "/frame" => {
+                            let q = req.uri().query().unwrap_or("");
+                            let param = |k: &str| -> Option<u32> {
+                                q.split('&')
+                                    .filter_map(|kv| kv.split_once('='))
+                                    .find(|(name, _)| *name == k)
+                                    .and_then(|(_, v)| v.parse().ok())
+                            };
+                            let max_width = param("max_width").unwrap_or(768);
+                            let quality = param("quality").unwrap_or(80).clamp(1, 100) as u8;
+
+                            let latest = match http_frames.lock() {
+                                Ok(rb) => rb.read_latest().cloned(),
+                                Err(_) => None,
+                            };
+                            let (status, body) = match latest {
+                                None => (
+                                    503,
+                                    "{\"error\":\"no frame captured yet — is capture running?\"}"
+                                        .to_string(),
+                                ),
+                                Some(slot) => {
+                                    let frame = iris_capture::frame::CaptureFrame {
+                                        sequence: slot.sequence,
+                                        width: slot.width,
+                                        height: slot.height,
+                                        format: slot.format.clone(),
+                                        data: slot.data.clone(),
+                                        timestamp_us: slot.timestamp_us,
+                                        is_cropped: false,
+                                    };
+                                    match iris_capture::snapshot::snapshot(
+                                        &frame, max_width, quality,
+                                    ) {
+                                        Ok(snap) => (
+                                            200,
+                                            format!(
+                                                concat!(
+                                                    "{{\"sequence\":{},\"width\":{},",
+                                                    "\"height\":{},\"captured_us\":{},",
+                                                    "\"mime\":\"{}\",\"data_url\":\"{}\"}}"
+                                                ),
+                                                slot.sequence,
+                                                snap.width,
+                                                snap.height,
+                                                slot.timestamp_us,
+                                                snap.mime,
+                                                snap.data_url()
+                                            ),
+                                        ),
+                                        Err(e) => (
+                                            500,
+                                            format!("{{\"error\":\"snapshot failed: {e}\"}}"),
+                                        ),
+                                    }
+                                }
+                            };
+                            Ok::<_, Infallible>(
+                                Response::builder()
+                                    .status(status)
+                                    .header("content-type", "application/json")
+                                    .body(Body::from(body))
+                                    .unwrap(),
+                            )
+                        }
                         "/metrics" => {
                             let body = prometheus_text();
                             Ok::<_, Infallible>(
@@ -513,7 +728,9 @@ impl IrisRuntime {
                                 .unwrap(),
                         ),
                     }
-                }))
+                        }
+                    }))
+                }
             });
             tokio::spawn(async move {
                 // `Server::bind` PANICS when the address is taken, and the
@@ -762,6 +979,7 @@ impl IrisRuntime {
             app_state,
             ipc_handle,
             capture_handle,
+            stream_handle,
             control_handle,
             _tasks: tasks,
             _capture_telemetry_tx: capture_telemetry_tx.clone(),

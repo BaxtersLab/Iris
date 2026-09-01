@@ -28,6 +28,21 @@ Iris is a tool, not a brain.
   `cargo build --workspace` and `cargo test --workspace` do not cover it; build
   it with `--manifest-path crates/iris-ipc-pipe-bridge/Cargo.toml`
 
+## Giving an agent eyes
+
+Iris exists so an agent can see outside the box. One request, one JPEG, ready
+for an OpenAI-format vision message:
+
+```bash
+curl -s 'http://127.0.0.1:9180/frame?max_width=768'
+# {"sequence":151,"width":512,"height":288,"captured_us":...,
+#  "mime":"image/jpeg","data_url":"data:image/jpeg;base64,/9j/4AAQ..."}
+```
+
+`data_url` drops straight into `image_url.url`. **`docs/AGENT_VISION.md`** has
+the llama.cpp example and the parameters. Loopback only, and no inference —
+Iris hands over pixels and says nothing about what is in them.
+
 ## A note on `Iris instruction blocks/`
 
 That folder holds the **March 2026 build instructions**, kept as a record of how

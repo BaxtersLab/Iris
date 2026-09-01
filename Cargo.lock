@@ -2305,7 +2305,9 @@ dependencies = [
  "iris-core",
  "iris-hal",
  "iris-ipc",
+ "jpeg-encoder",
  "serde",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "windows 0.54.0",
@@ -2442,6 +2444,7 @@ dependencies = [
  "iris-hal",
  "iris-hrt",
  "iris-ipc",
+ "iris-stream",
  "libc",
  "png",
  "reqwest",
@@ -2493,6 +2496,12 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
 ]
+
+[[package]]
+name = "jpeg-encoder"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0370574b86f7eca156b9f298392b5e69a23f8c86f3f865add60bbc2e79467a6"
 
 [[package]]
 name = "js-sys"

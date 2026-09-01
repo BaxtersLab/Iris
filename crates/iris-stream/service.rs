@@ -131,25 +131,41 @@ impl StreamService {
     fn on_frame(&mut self, frame: CaptureFrame) {
         self.frames_received += 1;
 
+        // The ring is maintained in EVERY mode, not only in Pull.
+        //
+        // It is the "what do you see right now" surface, and a pull consumer —
+        // an agent asking for the current frame — must be able to ask at any
+        // time without the service having been configured for it in advance.
+        // Making that conditional on the mode meant the UI (a push subscriber)
+        // and an agent (a pull reader) could not both be served, which is the
+        // ordinary case rather than an exotic one.
+        //
+        // The cost is one copy per frame into a fixed ring, which is bounded
+        // and small beside the fan-out it sits next to.
+        let before = self.ring_buffer.lock().map(|r| r.overflow_count()).unwrap_or(0);
+        if let Ok(mut rb) = self.ring_buffer.lock() {
+            rb.write(&frame);
+        }
+        let after = self
+            .ring_buffer
+            .lock()
+            .map(|r| r.overflow_count())
+            .unwrap_or(before);
+        if after > before {
+            self.emit(TelemetryEvent::RingBufferOverflow {
+                dropped_frames: after,
+            });
+        }
+
         match self.mode {
-            StreamMode::Pull => {
-                let before = self.ring_buffer.lock().map(|r| r.overflow_count()).unwrap_or(0);
-                if let Ok(mut rb) = self.ring_buffer.lock() {
-                    rb.write(&frame);
-                }
-                let after = self.ring_buffer.lock().map(|r| r.overflow_count()).unwrap_or(before);
-                if after > before {
-                    self.emit(TelemetryEvent::RingBufferOverflow {
-                        dropped_frames: after,
-                    });
-                }
-            }
+            // Pull consumers read the ring directly; nothing further to do.
+            StreamMode::Pull => {}
             StreamMode::Push => self.push_to_subscribers(&frame),
             // Refused at SetMode and at construction; unreachable in practice,
-            // and a silent fall-through to Pull is exactly what must not happen.
+            // and a silent fall-through is exactly what must not happen.
             StreamMode::SharedMemory | StreamMode::Ipc => {
                 tracing::error!(
-                    "stream mode {} is not implemented; frame {} discarded",
+                    "stream mode {} is not implemented; frame {} not fanned out",
                     self.mode,
                     frame.sequence
                 );
