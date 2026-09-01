@@ -94,6 +94,20 @@ than left silently incomplete. Format:
 
       Needs a Windows box.
 
+## Windows — single-instance guard, opened 2026-08-31
+
+- [ ] STUB: `iris-ui/single_instance.rs` — `acquire()` is implemented for unix
+      only (`flock(2)` on `$XDG_RUNTIME_DIR/iris.lock`). The `cfg(not(unix))`
+      arm returns `Instance::Unavailable`, so **on Windows the guard does not
+      run and a second Iris can still start.**
+      The Windows equivalent is a named mutex — `CreateMutexW` with a fixed
+      name, treating `ERROR_ALREADY_EXISTS` as "another instance holds it".
+      Not written here because this box cannot build or run the Windows target,
+      and an unrunnable guard is worse than a declared gap.
+      **Consequences on Windows today are milder than they were on Linux:** the
+      metrics bind is now non-fatal on both platforms, so a second instance no
+      longer aborts the process — it merely contends for the camera.
+
 ## Unbuilt crates — declared 2026-08-31
 
 Both existed as one-function crates that **the README advertised as delivered

@@ -28,6 +28,13 @@ Iris is a tool, not a brain.
   `cargo build --workspace` and `cargo test --workspace` do not cover it; build
   it with `--manifest-path crates/iris-ipc-pipe-bridge/Cargo.toml`
 
+## A note on `Iris instruction blocks/`
+
+That folder holds the **March 2026 build instructions**, kept as a record of how
+Iris was specified. They are phrased as objectives and read like a to-do list;
+they are not one — see the README inside it. `ROADMAP.md` is the only
+authoritative statement of what is not yet built.
+
 ## Prerequisites
 
 Rust (stable) plus a few native dependencies. **`DEPENDENCIES.md` has the
