@@ -148,6 +148,43 @@ fn a_menu_companion_is_not_toggled_blindly() {
     }
 }
 
+/// REGRESSION, found on a real camera and not reproducible with a fake one.
+///
+/// V4L2 reports the companion as **"White Balance, Automatic"** — with a comma.
+/// The first normalisation replaced only `-` and space, producing
+/// `white_balance,_automatic`, which matched nothing: the camera had the
+/// companion and Iris said the control had no automation. No test author
+/// writes a comma into a fixture, so only hardware surfaced it.
+#[test]
+fn a_punctuated_driver_name_still_matches_its_companion() {
+    let all = vec![
+        info(9, "White Balance, Automatic", 0, 1, 1, 1),
+        info(12, "White Balance", 2800, 6500, 1, 4000),
+    ];
+    assert_eq!(
+        crate::control::normalise_control_name("White Balance, Automatic"),
+        "white_balance_automatic"
+    );
+    match resolve_auto_support(&all, "White Balance") {
+        AutoSupport::Toggleable { companion_id, .. } => assert_eq!(companion_id, 9),
+        other => panic!("a comma must not hide the companion, got {other:?}"),
+    }
+}
+
+/// Punctuation, case and spacing all reduce to the same key, so the control a
+/// profile names is the control the driver reported however it spelled it.
+#[test]
+fn normalisation_collapses_punctuation_and_runs() {
+    for (raw, want) in [
+        ("Exposure Time, Absolute", "exposure_time_absolute"),
+        ("  White-Balance   Temperature ", "white_balance_temperature"),
+        ("Backlight Compensation", "backlight_compensation"),
+        ("__gain__", "gain"),
+    ] {
+        assert_eq!(crate::control::normalise_control_name(raw), want, "{raw:?}");
+    }
+}
+
 #[test]
 fn no_companion_means_no_auto_support() {
     let all = vec![info(1, "brightness", -64, 64, 1, 0)];
@@ -606,4 +643,123 @@ async fn a_refused_write_reports_failure_and_emits_nothing() {
         "a write the device refused must not be reported as a change"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- against a real camera ----------------------------------------------
+
+/// End to end on real hardware: list the camera's controls through the
+/// service, write one, and read it back changed.
+///
+/// Hardware-gated on `IRIS_USE_HW=1`, and — following the discipline the rest
+/// of the suite uses — it distinguishes **no camera attached** (an environment
+/// fact, so skip) from **a camera present that misbehaves** (a real failure).
+///
+/// What this proves that the fake-backend tests cannot: that a control service
+/// can hold the device for control ioctls **on its own fd while the capture
+/// path is streaming from the same node**. V4L2 permits a second open for
+/// controls, but "permits" is documentation, not evidence.
+#[tokio::test]
+async fn real_camera_controls_list_and_take_a_write() {
+    if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
+        eprintln!("skipping real_camera_controls_list_and_take_a_write (set IRIS_USE_HW=1)");
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use iris_hal::v4l2_backend::v4l2::V4l2UvcBackend;
+
+        if !V4l2UvcBackend::video_nodes_present() {
+            eprintln!(
+                "SKIP real_camera_controls_list_and_take_a_write: \
+                 IRIS_USE_HW=1 but no /dev/video* node exists — no camera attached"
+            );
+            return;
+        }
+
+        let devices = V4l2UvcBackend::enumerate_sync().expect("enumerate");
+        assert!(
+            !devices.is_empty(),
+            "video nodes exist but nothing enumerated — that is a regression, not an empty bench"
+        );
+        let device = devices[0].id.clone();
+        eprintln!("controls on {device}");
+
+        let backend = std::sync::Arc::new(V4l2UvcBackend::new());
+        let (tx, _rx) = tokio::sync::broadcast::channel(64);
+        let dir = std::env::temp_dir().join(format!("iris-hw-profiles-{}", std::process::id()));
+        let (svc, handle) = crate::service::ControlService::new(
+            backend,
+            device,
+            tx,
+            dir.clone(),
+        );
+        let task = tokio::spawn(svc.run());
+
+        let caps = handle.list_controls().await.expect("list_controls");
+        assert!(!caps.is_empty(), "a UVC camera must expose at least one control");
+        for c in &caps {
+            eprintln!(
+                "  {:<26} min={:<6} max={:<6} step={:<4} default={:<6} current={} auto={}",
+                c.control.name(),
+                c.min,
+                c.max,
+                c.step,
+                c.default,
+                c.current,
+                c.auto.is_toggleable()
+            );
+            assert!(c.min < c.max, "{}: min {} not below max {}", c.control.name(), c.min, c.max);
+            assert!(
+                c.current >= c.min && c.current <= c.max,
+                "{}: current {} outside its own reported range",
+                c.control.name(),
+                c.current
+            );
+        }
+
+        // Write to the first control that has room to move, then read it back.
+        let target = caps
+            .iter()
+            .find(|c| c.max - c.min >= c.step.max(1) * 2)
+            .expect("at least one control with a usable range");
+        let original = target.current;
+        let wanted = target.clamp_value(if original == target.max {
+            original - target.step.max(1)
+        } else {
+            original + target.step.max(1)
+        });
+        assert_ne!(wanted, original, "the test must actually change something");
+
+        handle
+            .set_control(target.control.clone(), wanted)
+            .await
+            .unwrap_or_else(|e| panic!("set {} = {wanted}: {e}", target.control.name()));
+
+        let after = handle
+            .get_control(target.control.clone())
+            .await
+            .expect("read back");
+        eprintln!(
+            "  set {} {} -> {}, read back {}",
+            target.control.name(),
+            original,
+            wanted,
+            after
+        );
+        assert_eq!(
+            after, wanted,
+            "{}: the camera did not take the write",
+            target.control.name()
+        );
+
+        // Leave the camera as we found it.
+        handle
+            .set_control(target.control.clone(), original)
+            .await
+            .expect("restore");
+
+        handle.shutdown().await.expect("shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

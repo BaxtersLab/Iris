@@ -35,6 +35,37 @@ pub enum CameraControl {
     Custom(String),
 }
 
+/// Reduce a driver-reported control name to a comparable key.
+///
+/// Drivers punctuate. V4L2 on the reference camera reports **"White Balance,
+/// Automatic"** — with a comma — which an earlier version normalised to
+/// `white_balance,_automatic` and therefore failed to recognise as the
+/// automation companion of `white_balance`. The camera had the companion, and
+/// Iris reported the control as having no automation.
+///
+/// Only a real camera surfaced that: a fake backend uses whatever names the
+/// test author writes, and no author writes a comma.
+///
+/// So: lowercase, map every non-alphanumeric character to `_`, collapse runs,
+/// and trim the ends.
+pub fn normalise_control_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_underscore = true; // trims leading separators
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_underscore = false;
+        } else if !last_underscore {
+            out.push('_');
+            last_underscore = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    out
+}
+
 impl CameraControl {
     /// Resolve a driver-reported name to a control.
     ///
@@ -43,7 +74,7 @@ impl CameraControl {
     /// `white_balance`. Unknown names become `Custom` rather than an error —
     /// a control this list has not heard of is still a control.
     pub fn from_name(name: &str) -> Self {
-        let n = name.trim().to_lowercase().replace(['-', ' '], "_");
+        let n = normalise_control_name(name);
         match n.as_str() {
             "brightness" => Self::Brightness,
             "contrast" => Self::Contrast,
@@ -52,6 +83,7 @@ impl CameraControl {
             "gamma" => Self::Gamma,
             "hue" => Self::Hue,
             "white_balance" | "whitebalance" | "white_balance_temperature" => Self::WhiteBalance,
+            "power_line_frequency" => Self::Custom("power_line_frequency".into()),
             "backlight_compensation" | "backlightcompensation" => Self::BacklightCompensation,
             "gain" => Self::Gain,
             "exposure" | "exposure_time_absolute" => Self::Exposure,
@@ -217,7 +249,7 @@ pub fn resolve_auto_support(all: &[ControlCapabilityInfo], target: &str) -> Auto
     for cand in candidates {
         if let Some(info) = all
             .iter()
-            .find(|i| i.name.trim().to_lowercase().replace(['-', ' '], "_") == cand)
+            .find(|i| normalise_control_name(&i.name) == cand)
         {
             return if info.min == 0 && info.max == 1 {
                 AutoSupport::Toggleable {

@@ -25,6 +25,6 @@ pub mod service;
 #[cfg(test)]
 mod tests;
 
-pub use control::{AutoSupport, CameraControl, ControlCapability};
+pub use control::{normalise_control_name, AutoSupport, CameraControl, ControlCapability};
 pub use profile::{CameraProfile, ProfileStore};
 pub use service::{ControlCommand, ControlHandle, ControlService};
