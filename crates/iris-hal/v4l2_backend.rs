@@ -564,14 +564,20 @@ pub mod v4l2 {
             )))
         }
 
-        fn get_control_sync(dev: &OpenDevice, control_id: u32) -> HalResult<i64> {
+        /// Read one control from an already-open fd.
+        ///
+        /// Takes a raw fd rather than an `OpenDevice` because control ioctls do
+        /// not need a streaming setup — any open handle on the node will do.
+        /// That is what lets `get_control` work on a transient fd while capture
+        /// holds the device (see the async wrapper below).
+        fn get_control_sync(raw: std::os::fd::RawFd, control_id: u32) -> HalResult<i64> {
             let mut ctrl = V4l2Control {
                 id: control_id,
                 value: 0,
             };
             if unsafe {
                 xioctl(
-                    dev.fd.as_raw_fd(),
+                    raw,
                     VIDIOC_G_CTRL,
                     &mut ctrl as *mut _ as *mut _,
                 )
@@ -585,7 +591,7 @@ pub mod v4l2 {
             Ok(ctrl.value as i64)
         }
 
-        fn set_control_sync(dev: &OpenDevice, control_id: u32, value: i64) -> HalResult<()> {
+        fn set_control_sync(raw: std::os::fd::RawFd, control_id: u32, value: i64) -> HalResult<()> {
             let v = i32::try_from(value).map_err(|_| {
                 HalError::InvalidParameter(format!("control value {value} does not fit in i32"))
             })?;
@@ -595,7 +601,7 @@ pub mod v4l2 {
             };
             if unsafe {
                 xioctl(
-                    dev.fd.as_raw_fd(),
+                    raw,
                     VIDIOC_S_CTRL,
                     &mut ctrl as *mut _ as *mut _,
                 )
@@ -840,31 +846,56 @@ pub mod v4l2 {
                 .map_err(|e| HalError::Io(format!("spawn_blocking join error: {e:?}")))?
         }
 
+        /// Read a control, whether or not this backend holds the device.
+        ///
+        /// If it does, its fd is used. If it does not, the node is opened
+        /// briefly for the ioctl and closed again.
+        ///
+        /// **That fallback is the whole point.** Requiring `open_device` first
+        /// meant a control service had to hold the device open — and
+        /// `open_sync` performs `VIDIOC_S_FMT`, which a second handle cannot do
+        /// while the capture path is negotiating its own format. The result was
+        /// `VIDIOC_S_FMT: Device or resource busy` and a capture backend that
+        /// never started, intermittently, depending on which opened first.
+        /// Control ioctls need no streaming setup, so they should never have
+        /// required one.
         async fn get_control(&self, id: &DeviceId, control_id: u32) -> HalResult<i64> {
             let state = Arc::clone(&self.state);
             let id = id.clone();
             tokio::task::spawn_blocking(move || {
                 let guard = state.lock().unwrap();
-                let dev = guard.as_ref().ok_or(HalError::DeviceNotOpen)?;
-                if dev.path != id.0 {
-                    return Err(HalError::DeviceNotOpen);
+                match guard.as_ref() {
+                    Some(dev) if dev.path == id.0 => {
+                        V4l2UvcBackend::get_control_sync(dev.fd.as_raw_fd(), control_id)
+                    }
+                    _ => {
+                        drop(guard);
+                        let fd = open_node(&id.0).ok_or(HalError::DeviceNotFound)?;
+                        V4l2UvcBackend::get_control_sync(fd.as_raw_fd(), control_id)
+                    }
                 }
-                V4l2UvcBackend::get_control_sync(dev, control_id)
             })
             .await
             .map_err(|e| HalError::Io(format!("spawn_blocking join error: {e:?}")))?
         }
 
+        /// Write a control, whether or not this backend holds the device.
+        /// Same transient-open fallback as `get_control`, for the same reason.
         async fn set_control(&self, id: &DeviceId, control_id: u32, value: i64) -> HalResult<()> {
             let state = Arc::clone(&self.state);
             let id = id.clone();
             tokio::task::spawn_blocking(move || {
                 let guard = state.lock().unwrap();
-                let dev = guard.as_ref().ok_or(HalError::DeviceNotOpen)?;
-                if dev.path != id.0 {
-                    return Err(HalError::DeviceNotOpen);
+                match guard.as_ref() {
+                    Some(dev) if dev.path == id.0 => {
+                        V4l2UvcBackend::set_control_sync(dev.fd.as_raw_fd(), control_id, value)
+                    }
+                    _ => {
+                        drop(guard);
+                        let fd = open_node(&id.0).ok_or(HalError::DeviceNotFound)?;
+                        V4l2UvcBackend::set_control_sync(fd.as_raw_fd(), control_id, value)
+                    }
                 }
-                V4l2UvcBackend::set_control_sync(dev, control_id, value)
             })
             .await
             .map_err(|e| HalError::Io(format!("spawn_blocking join error: {e:?}")))?

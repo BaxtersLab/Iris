@@ -132,12 +132,21 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
 
     pub async fn run(mut self, mut cmd_rx: mpsc::Receiver<CaptureCommand>) {
         if let Err(e) = self.backend.start().await {
+            // Also SAY so. This only set a watch-channel state that nothing
+            // reads and printed nothing, so a capture backend that failed to
+            // start produced a permanently blank preview and not one word
+            // anywhere explaining it.
+            eprintln!("CaptureService: backend failed to start: {e}");
+            tracing::error!("capture backend failed to start: {e}");
             self.state_tx
                 .send(CaptureServiceState::Error(format!("start failed: {}", e)))
                 .ok();
             return;
         }
         self.state_tx.send(CaptureServiceState::Capturing).ok();
+
+        let mut frame_errors: u64 = 0;
+        let mut last_error_report = std::time::Instant::now();
 
         loop {
             let next_fut = self.backend.next_frame();
@@ -216,7 +225,29 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
                             }
                         }
                         Err(e) => {
+                            // Report it, but not on every frame: a persistent
+                            // failure at 30 fps would push thirty identical
+                            // lines a second and bury everything else. The
+                            // first one is the diagnosis; the rest are a
+                            // counter.
+                            //
+                            // Silence here is what made a dead capture look
+                            // like a working app with a grey picture.
+                            frame_errors += 1;
+                            let report = frame_errors == 1
+                                || frame_errors % 100 == 0
+                                || last_error_report.elapsed() >= std::time::Duration::from_secs(5);
+                            if report {
+                                eprintln!(
+                                    "CaptureService: frame read failed ({frame_errors} so far): {e}"
+                                );
+                                tracing::warn!("frame read failed ({frame_errors}): {e}");
+                                last_error_report = std::time::Instant::now();
+                            }
                             self.state_tx.send(CaptureServiceState::Error(format!("frame error: {}", e))).ok();
+                            // Do not spin: a failing read usually returns at
+                            // once, and an unpaced retry loop burns a core.
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
                     }
                 }

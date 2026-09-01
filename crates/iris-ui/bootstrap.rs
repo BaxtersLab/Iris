@@ -415,10 +415,53 @@ impl IrisRuntime {
                         capture_cfg.clone(),
                     ))
                 }
-            } else {
+            } else if backend_name == "mock" {
+                println!("IRIS_BACKEND=mock: using the synthetic backend");
                 Box::new(iris_capture::backend::MockCaptureBackend::new(
                     capture_cfg.clone(),
                 ))
+            } else {
+                // NO IRIS_BACKEND SET — use the camera if there is one.
+                //
+                // This defaulted to the mock backend, which fills every byte
+                // with 128. So Iris launched normally — from the desktop, with
+                // no environment set — showed a **uniform grey rectangle**
+                // instead of the camera, and looked like a broken preview
+                // rather than a synthetic one. The camera only appeared if you
+                // knew to export IRIS_BACKEND=v4l2, which nothing tells you.
+                //
+                // A camera application defaults to the camera. The mock stays
+                // available, explicitly, as IRIS_BACKEND=mock.
+                #[cfg(target_os = "linux")]
+                {
+                    use iris_hal::v4l2_backend::v4l2::V4l2UvcBackend;
+                    let have_camera = matches!(
+                        V4l2UvcBackend::enumerate_sync(),
+                        Ok(ref devices) if !devices.is_empty()
+                    );
+                    if have_camera {
+                        println!("Capture backend: v4l2 (a camera is present)");
+                        Box::new(iris_capture::backend::UvcCaptureBackend::new(
+                            V4l2UvcBackend::new(),
+                            capture_cfg.clone(),
+                        ))
+                    } else {
+                        println!(
+                            "Capture backend: mock — no /dev/video* camera found. \
+                             The preview will be a flat grey test image, not a fault."
+                        );
+                        Box::new(iris_capture::backend::MockCaptureBackend::new(
+                            capture_cfg.clone(),
+                        ))
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    println!("Capture backend: mock (no default camera backend on this platform)");
+                    Box::new(iris_capture::backend::MockCaptureBackend::new(
+                        capture_cfg.clone(),
+                    ))
+                }
             };
 
         let (capture_service, capture_handle) = CaptureService::new(

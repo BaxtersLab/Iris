@@ -167,26 +167,18 @@ impl<B: UvcBackend> ControlService<B> {
 
     /// Run until told to stop, or until every handle is dropped.
     ///
-    /// Opens the device first. `list_controls` works on a freshly opened node,
-    /// but `get_control`/`set_control` require the backend to be holding the
-    /// device — without this, listing succeeds, every current value silently
-    /// falls back to the driver's default, and every write fails with
-    /// `DeviceNotOpen`. That combination looks like a camera with unresponsive
-    /// controls rather than like a service that never opened it.
+    /// **Deliberately does not open the device.** An earlier version opened it
+    /// at startup so `get_control`/`set_control` would have a handle — and on
+    /// V4L2 `open_device` performs `VIDIOC_S_FMT`, which a second handle cannot
+    /// do while the capture path is negotiating its own format. That produced
+    /// `VIDIOC_S_FMT: Device or resource busy`, a capture backend that never
+    /// started, and a permanently blank preview — intermittently, depending on
+    /// which of the two opened first.
     ///
-    /// A failure to open is **not** fatal: the camera may be held by another
-    /// process, and reporting that per-operation is more useful than refusing
-    /// to start. It is logged loudly because it explains every later error.
+    /// The HAL now opens the node transiently for control ioctls, which need no
+    /// streaming setup. So this service can share a camera with the capture
+    /// path instead of competing with it for one.
     pub async fn run(mut self) {
-        match self.backend.open_device(&self.device).await {
-            Ok(()) => tracing::info!("control service opened {}", self.device),
-            Err(e) => tracing::warn!(
-                "control service could not open {} ({e}); \
-                 controls will list but reads and writes will fail",
-                self.device
-            ),
-        }
-
         while let Some(cmd) = self.cmd_rx.recv().await {
             match cmd {
                 ControlCommand::GetControl { control, reply } => {
@@ -240,12 +232,6 @@ impl<B: UvcBackend> ControlService<B> {
             }
         }
 
-        // Release the device so a later service — or another process — can
-        // take it. Dropping the backend would do it, but only once every clone
-        // is gone, and the capture path may still hold one.
-        if let Err(e) = self.backend.close_device(&self.device).await {
-            tracing::debug!("control service could not close {}: {e}", self.device);
-        }
     }
 
     async fn set_auto(&self, control: &CameraControl, enabled: bool) -> IrisResult<()> {

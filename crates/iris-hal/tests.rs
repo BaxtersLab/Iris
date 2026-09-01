@@ -360,19 +360,33 @@ mod tests {
             matches!(backend.close_device(&id).await, Err(HalError::DeviceNotOpen)),
             "close_device on an unopened device must be DeviceNotOpen"
         );
+        // Controls changed contract on 2026-09-01 and this assertion changed
+        // with them, deliberately.
+        //
+        // They used to require `open_device` first, which forced a control
+        // service to hold the camera — and on V4L2 opening performs
+        // `VIDIOC_S_FMT`, which a second handle cannot do while the capture
+        // path negotiates its own format. That produced
+        // `VIDIOC_S_FMT: Device or resource busy` and a dead preview.
+        // Control ioctls need no streaming setup, so they now open the node
+        // transiently when the backend does not already hold it.
+        //
+        // For a path that does not exist there is nothing to open, so the
+        // honest answer is DeviceNotFound — still a real answer, which is what
+        // this test exists to prove, and still never NotImplemented.
         assert!(
             matches!(
                 backend.get_control(&id, 0x0098_0900).await,
-                Err(HalError::DeviceNotOpen)
+                Err(HalError::DeviceNotFound)
             ),
-            "get_control on an unopened device must be DeviceNotOpen"
+            "get_control on a nonexistent device must be DeviceNotFound"
         );
         assert!(
             matches!(
                 backend.set_control(&id, 0x0098_0900, 1).await,
-                Err(HalError::DeviceNotOpen)
+                Err(HalError::DeviceNotFound)
             ),
-            "set_control on an unopened device must be DeviceNotOpen"
+            "set_control on a nonexistent device must be DeviceNotFound"
         );
         assert!(
             matches!(backend.current_format(&id).await, Ok(None)),

@@ -8,6 +8,27 @@ use iris_ipc::IpcHandle;
 use iris_ipc::LoggedTelemetryReceiver;
 use std::sync::{Arc, Mutex};
 
+/// Trim one log line to something that fits a narrow strip on one row.
+///
+/// Telemetry lines carry a full RFC3339 timestamp and a `Debug`-formatted
+/// event, which is far wider than the panel. Wrapped, a single entry ate three
+/// rows and the three-line log showed one event. Truncated with an ellipsis it
+/// stays one line per event, which is the point of showing three.
+pub fn truncate_log_line(line: &str) -> String {
+    const MAX: usize = 72;
+    // Drop the date, keep the time: the date is the same for every line in a
+    // session and costs eleven characters that the event could use.
+    let trimmed = match line.split_once('T') {
+        Some((head, rest)) if head.len() == 10 && head.starts_with("20") => rest,
+        _ => line,
+    };
+    if trimmed.chars().count() <= MAX {
+        return trimmed.to_string();
+    }
+    let cut: String = trimmed.chars().take(MAX - 1).collect();
+    format!("{cut}…")
+}
+
 /// Frames taken off the capture channel in a single repaint, at most.
 ///
 /// The UI thread must never do work proportional to how far behind it has
@@ -904,14 +925,36 @@ impl eframe::App for IrisApp {
 
             ui.separator();
 
-            ui.heading("Telemetry Log");
-            ScrollArea::vertical().show(ui, |ui| {
+            // The log is a HEARTBEAT, not a record.
+            //
+            // It used to render the last 200 entries in an unbounded scroll
+            // area, so it took most of the window and pushed the preview — the
+            // thing the application is for — into a corner. Three lines is
+            // enough to answer the only question it needs to answer at a
+            // glance: is the camera rolling? The full stream is still on
+            // stdout, where a log belongs.
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Activity").small().strong());
                 if let Ok(lg) = self.log.lock() {
-                    for line in lg.iter().rev().take(200) {
-                        ui.label(line);
-                    }
+                    ui.label(
+                        egui::RichText::new(format!("({} entries)", lg.len()))
+                            .small()
+                            .weak(),
+                    );
                 }
             });
+            if let Ok(lg) = self.log.lock() {
+                if lg.is_empty() {
+                    ui.label(egui::RichText::new("nothing yet").small().weak().italics());
+                } else {
+                    // Newest first: the most recent line is the one being
+                    // watched, so it goes where the eye already is rather than
+                    // three rows down.
+                    for line in lg.iter().rev().take(3) {
+                        ui.label(egui::RichText::new(truncate_log_line(line)).small().monospace());
+                    }
+                }
+            }
         });
 
         // Keyboard shortcuts for accessibility: allow quick Start/Stop/Refresh
@@ -1135,5 +1178,46 @@ mod tests {
     fn undecodable_mjpeg_converts_to_nothing() {
         let f = frame(0, 16, 16, PixelFormat::Mjpeg, vec![0xFF, 0xD8, 0x00, 0x01]);
         assert!(frame_to_rgba(&f).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod log_line_tests {
+    use super::truncate_log_line;
+
+    /// A telemetry line is a full RFC3339 timestamp plus a Debug-formatted
+    /// event — far wider than a narrow panel. Wrapped, one entry took three
+    /// rows and the three-line log showed a single event.
+    #[test]
+    fn a_long_line_is_cut_to_one_row() {
+        let line = "2026-09-01 16:31:37.243217648 UTC - FrameCaptured { sequence: 295, \
+                    width: 1920, height: 1080, size_bytes: 120416 }";
+        let out = truncate_log_line(line);
+        assert!(out.chars().count() <= 72, "got {} chars: {out}", out.chars().count());
+        assert!(out.ends_with('…'), "a cut line must show it was cut: {out}");
+    }
+
+    /// The date is identical for every line in a session and costs eleven
+    /// characters the event could use.
+    #[test]
+    fn the_date_is_dropped_but_the_time_is_kept() {
+        let out = truncate_log_line("2026-09-01T16:31:37Z started");
+        assert!(!out.contains("2026-09-01"), "the date must go: {out}");
+        assert!(out.contains("16:31:37"), "the time must stay: {out}");
+    }
+
+    #[test]
+    fn a_short_line_is_left_alone() {
+        assert_eq!(truncate_log_line("[Scan] Found 1 device(s)"), "[Scan] Found 1 device(s)");
+    }
+
+    /// Truncation counts CHARACTERS, not bytes: cutting a multi-byte character
+    /// in half would panic on a String boundary.
+    #[test]
+    fn a_multibyte_line_does_not_split_a_character() {
+        let line = "é".repeat(200);
+        let out = truncate_log_line(&line);
+        assert!(out.chars().count() <= 72);
+        assert!(out.ends_with('…'));
     }
 }

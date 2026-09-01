@@ -2,7 +2,21 @@ use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn telemetry_assertions() {
-    // Bootstrap the minimal Iris runtime (mock backends)
+    // Pin the MOCK backend explicitly.
+    //
+    // This comment used to say "(mock backends)" and rely on that being the
+    // default. On 2026-09-01 the default became "use the camera if there is
+    // one", because defaulting a camera application to a synthetic grey image
+    // was the wrong behaviour for users — and this test silently started
+    // running against real hardware, where frame sizes vary per frame and ROI
+    // on MJPEG decodes to RGB24 rather than shrinking. Its subject is
+    // telemetry, not backend selection, so it needs the deterministic backend
+    // by name rather than by assumption.
+    //
+    // Safe here: an integration test is its own process, so this affects
+    // nothing else.
+    std::env::set_var("IRIS_BACKEND", "mock");
+
     let cfg = iris_core::config::IrisConfig::default();
     let rt = iris_ui::bootstrap::IrisRuntime::bootstrap(cfg)
         .await
