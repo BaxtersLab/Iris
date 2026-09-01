@@ -2,6 +2,17 @@
 
 All notable changes in this workspace since the previous local snapshot.
 
+0.2.0 — 2026-09-01
+------------------
+First version bump since the package existed, and the reason is itself a fix:
+the `.deb` stayed at 0.1.1 across a session that added the icon, the settings
+panel, the adaptive window and two capture fixes, so `dpkg` reported
+"Unpacking (0.1.1) over (0.1.1)". Installing the file directly still works —
+which is how it went unnoticed — but apt sees an identical version and skips
+the upgrade, so a published build would never reach anyone who already had one.
+`build_deb.sh` now refuses to build when the package version and the `iris-ui`
+crate version disagree.
+
 Unreleased
 ----------
 An application icon — 2026-09-01

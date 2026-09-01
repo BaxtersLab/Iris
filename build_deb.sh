@@ -15,6 +15,21 @@ PKG=baxters-iris
 VERSION="$(sed -n 's/^Version: //p' packaging/DEBIAN/control)"
 [ -n "$VERSION" ] || { echo "FATAL: no Version in packaging/DEBIAN/control" >&2; exit 1; }
 
+# The package version and the application's own version must agree.
+#
+# They silently drifted: the .deb stayed 0.1.1 across a session that added the
+# icon, the settings panel, the adaptive window and two capture fixes, so dpkg
+# reported "Unpacking (0.1.1) over (0.1.1)". Installing the FILE directly still
+# works, which is how it went unnoticed — but apt sees an identical version and
+# skips the upgrade entirely, so a published build would simply never reach
+# anyone who already had one.
+CRATE_VERSION="$(sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' crates/iris-ui/Cargo.toml)"
+if [ "$VERSION" != "$CRATE_VERSION" ]; then
+    echo "FATAL: package version $VERSION != iris-ui crate version $CRATE_VERSION" >&2
+    echo "       bump both, or a published upgrade will be skipped as already-installed" >&2
+    exit 1
+fi
+
 # Honour CARGO_TARGET_DIR, as run.sh does — builds on this box use a space-free
 # target directory outside the tree.
 TARGET_DIR="${CARGO_TARGET_DIR:-$HERE/target}"
