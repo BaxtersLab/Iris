@@ -72,6 +72,12 @@ impl Drop for MutexHandle {
 /// `$XDG_RUNTIME_DIR` is the correct home for it — it is per-user, on tmpfs,
 /// and cleared at logout. The `/tmp` fallback is per-uid so two users on one
 /// machine do not lock each other out of their own sessions.
+/// `#[cfg(unix)]`: there is no lock *file* on Windows — that side uses a named
+/// mutex, whose identity is a string, not a path. Ungated, this also failed to
+/// behave on Windows, because `Path::is_absolute()` is false for
+/// `/run/user/1000` there (no drive letter), so the runtime directory was
+/// rejected and the `/tmp` fallback taken.
+#[cfg(unix)]
 pub fn lock_path(runtime_dir: Option<String>, uid: u32) -> PathBuf {
     match runtime_dir.filter(|d| !d.is_empty() && std::path::Path::new(d).is_absolute()) {
         Some(dir) => PathBuf::from(dir).join("iris.lock"),
@@ -193,6 +199,16 @@ pub fn acquire() -> Instance {
 mod tests {
     use super::*;
 
+    /// These three cover the unix lock-file path selection and are meaningless
+    /// on Windows, where the guard is a named mutex.
+    ///
+    /// **They were not gated when written, and shipped failing on Windows** —
+    /// `the_runtime_dir_is_preferred` asserted `/run/user/1000/iris.lock` and
+    /// got `/tmp/iris-1000.lock`, because `Path::is_absolute()` is false for a
+    /// unix path there. Worse, the round-2 assignment told the Windows agent
+    /// these tests *were* `cfg(unix)`-guarded; only the flock test was. Check
+    /// the gate, do not describe it from memory.
+    #[cfg(unix)]
     #[test]
     fn the_runtime_dir_is_preferred() {
         assert_eq!(
@@ -202,6 +218,7 @@ mod tests {
     }
 
     /// Per-uid, so two users on one machine do not lock each other out.
+    #[cfg(unix)]
     #[test]
     fn the_tmp_fallback_is_per_uid() {
         assert_eq!(lock_path(None, 1000).to_str(), Some("/tmp/iris-1000.lock"));
@@ -211,6 +228,7 @@ mod tests {
     /// An env var set to "" is set, and a relative value must be ignored — the
     /// same XDG rule the config search uses. Either would put the lock
     /// somewhere that depends on the working directory.
+    #[cfg(unix)]
     #[test]
     fn empty_and_relative_runtime_dirs_fall_back() {
         assert_eq!(lock_path(Some(String::new()), 7).to_str(), Some("/tmp/iris-7.lock"));

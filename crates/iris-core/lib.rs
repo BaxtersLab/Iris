@@ -166,19 +166,38 @@ mod config_search_paths {
         );
     }
 
-    /// The XDG location is what a packaged Iris will actually use, so its
+    /// A per-user location is what a packaged Iris will actually use, so its
     /// absence would make the whole change cosmetic.
+    ///
+    /// **This test shipped assuming unix.** It asserted an XDG path and a
+    /// literal `"iris/iris.toml"` suffix; on Windows `HOME` is unset (the
+    /// platform uses `APPDATA`/`USERPROFILE`) so only one path came back, and
+    /// `PathBuf` would spell the suffix with a backslash anyway. The Windows
+    /// agent hit it on round 2, and behind the failing assertion was a real
+    /// gap: Windows had no per-user config location at all. Now the platform
+    /// difference is in the code, and the test asserts the property rather than
+    /// one platform's spelling of it.
     #[test]
-    fn an_xdg_location_is_also_searched() {
+    fn a_per_user_location_is_also_searched() {
         let paths = IrisConfig::config_search_paths();
         assert!(
             paths.len() >= 2,
-            "expected an XDG path in addition to the executable directory, got {paths:?}"
+            "expected a per-user path in addition to the executable directory, got {paths:?}"
         );
         let last = paths.last().expect("at least one path");
-        assert!(
-            last.ends_with("iris/iris.toml"),
-            "the XDG entry must live under an iris/ directory, got {last:?}"
+        // Compare components, not a joined string: the separator is platform
+        // specific and asserting on `"iris/iris.toml"` is what made the
+        // original unix-only.
+        let tail: Vec<_> = last
+            .components()
+            .rev()
+            .take(2)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            tail,
+            vec!["iris.toml".to_string(), "iris".to_string()],
+            "the per-user entry must be <config dir>/iris/iris.toml, got {last:?}"
         );
     }
 

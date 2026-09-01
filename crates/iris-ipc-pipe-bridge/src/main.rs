@@ -70,8 +70,10 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(windows)]
     {
-        let pipe_name = r"\\.\\pipe\\iris-stream";
-        // prefer readable literal for CreateNamedPipeW
+        // One binding, not two. This was declared twice — the first with a
+        // double-escaped literal (`\\.\\pipe\\...`, which is not the pipe
+        // name Windows wants) and immediately shadowed by the correct one, so
+        // it was dead and warned on every Windows build.
         let pipe_name = r"\\.\pipe\iris-stream";
         eprintln!("iris-ipc-pipe-bridge: waiting for client on {pipe_name}...");
         let server = pipe::accept_client(pipe_name).await?;
@@ -115,6 +117,11 @@ fn unix_socket_path() -> std::path::PathBuf {
 
 /// The socket-path decision, with the environment passed in rather than read.
 ///
+/// `#[cfg(unix)]` because there is no unix socket on Windows — that side uses a
+/// named pipe. Without the gate this warned "function is never used" on every
+/// Windows build, which is how it was found: the zero-warning bar this crate
+/// was brought into the workspace to hold was only ever checked on Linux.
+///
 /// Split out so it can be tested: reading the environment inside the function
 /// makes the test mutate process-global state, which races every other test in
 /// the binary. The precedence is `IRIS_IPC_SOCKET`, then
@@ -127,6 +134,7 @@ fn unix_socket_path() -> std::path::PathBuf {
 /// obvious scratch directory was 96 characters deep on its own. The default
 /// paths here are short, but an `IRIS_IPC_SOCKET` pointing somewhere deep will
 /// fail at bind time.
+#[cfg(unix)]
 fn resolve_unix_socket_path(
     explicit: Option<String>,
     runtime_dir: Option<String>,
@@ -138,7 +146,14 @@ fn resolve_unix_socket_path(
     std::path::PathBuf::from(dir).join("iris-stream.sock")
 }
 
-#[cfg(test)]
+/// Unix-only, for two reasons that are easy to conflate. The function under
+/// test does not exist on Windows — but even if it did, these assertions
+/// compare against hardcoded forward-slash strings, and `PathBuf::join` inserts
+/// a backslash on Windows. The round-2 Windows agent found exactly that: three
+/// of these failed there with `Some("/tmp\\iris-stream.sock")`, the right
+/// directory with the wrong separator. Written on Linux, never compiled for
+/// Windows, shipped failing.
+#[cfg(all(test, unix))]
 mod socket_path_tests {
     use super::resolve_unix_socket_path;
 

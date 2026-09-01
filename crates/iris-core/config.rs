@@ -188,15 +188,46 @@ impl IrisConfig {
             paths.push(p);
         }
 
-        let xdg = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
-        if let Some(dir) = xdg {
+        if let Some(dir) = Self::per_user_config_dir() {
             paths.push(dir.join("iris").join("iris.toml"));
         }
 
         paths
+    }
+
+    /// The per-user configuration directory for this platform.
+    ///
+    /// **Windows had none at all until 2026-08-31.** This looked only at
+    /// `XDG_CONFIG_HOME` and `HOME`, and Windows sets neither — it uses
+    /// `APPDATA` and `USERPROFILE` — so `config_search_paths` returned the
+    /// executable's directory and nothing else, leaving an installed Windows
+    /// build unconfigurable. Found by the Windows agent on round 2, as a test
+    /// failure that turned out to be a real product gap rather than a test
+    /// artifact.
+    ///
+    /// `is_absolute()` is checked only on unix. On Windows a path like
+    /// `/run/user/1000` is *not* absolute (no drive letter), and applying the
+    /// same filter there would silently reject values the platform considers
+    /// usable.
+    fn per_user_config_dir() -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            // %APPDATA% is the Windows convention (roaming per-user data), with
+            // %USERPROFILE%\AppData\Roaming as the fallback when it is unset.
+            if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+                return Some(appdata);
+            }
+            return std::env::var_os("USERPROFILE")
+                .map(|h| PathBuf::from(h).join("AppData").join("Roaming"));
+        }
+        #[cfg(not(windows))]
+        {
+            // XDG basedir: an absolute XDG_CONFIG_HOME, else ~/.config.
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        }
     }
 
     /// Load the first `iris.toml` found along [`config_search_paths`].
