@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+case "$1" in
+  configure)
+    mkdir -p /opt/baxters
+    # Assert the payload actually arrived rather than trusting the unpack.
+    [ -x /opt/baxters/iris/target/release/iris-ui ] || {
+        echo "baxters-iris: application binary missing after unpack" >&2; exit 1; }
+    [ -x /opt/baxters/iris/run.sh ] || {
+        echo "baxters-iris: run.sh missing or not executable — the desktop entry execs it" >&2
+        exit 1; }
+    [ -x /usr/bin/update-desktop-database ] && update-desktop-database -q /usr/share/applications || true
+    echo "baxters-iris: installed. Config: ~/.config/iris/iris.toml (optional)."
+    ;;
+esac
+exit 0

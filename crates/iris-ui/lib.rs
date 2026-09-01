@@ -2,6 +2,7 @@
 // Iris — iris-ui
 
 pub mod bootstrap;
+pub mod single_instance;
 pub mod ui_app;
 pub mod win32;
 

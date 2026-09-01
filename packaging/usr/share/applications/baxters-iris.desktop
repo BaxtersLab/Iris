@@ -1,0 +1,23 @@
+[Desktop Entry]
+Type=Application
+Name=Iris
+GenericName=Camera Interface
+Comment=USB camera capture with live telemetry
+Exec=/opt/baxters/iris/run.sh
+# A NAMED icon from the freedesktop spec, not a path into the payload.
+# The estate's other packages ship an icon.png and point Icon= at it; Iris has
+# no artwork yet, and pointing at a file that is not there gives a blank tile
+# with no error. "camera-web" is a standard icon name present in Adwaita and
+# Yaru, so it resolves on this box's desktop and degrades to the theme's
+# fallback anywhere it does not. Replace with a real icon when one exists.
+Icon=camera-web
+Terminal=false
+Categories=AudioVideo;Video;Graphics;Photography;
+Keywords=camera;webcam;uvc;capture;video;
+# Matches the app_id the application sets explicitly via
+# ViewportBuilder::with_app_id in crates/iris-ui/main.rs. Pinned on both sides
+# rather than relying on whatever winit derives from the binary name, which
+# could not be read back on a Wayland seat to confirm. This is what lets the
+# shell match a running window to this entry instead of showing a generic
+# placeholder.
+StartupWMClass=baxters-iris

@@ -111,6 +111,24 @@ controls are not implemented on Windows** — `WmfBackend::get_control`/
 `set_control` return an error and `list_controls` is empty, where the Linux V4L2
 side implements them fully. Needs a Windows box.
 
+## Install
+
+```sh
+cargo build --workspace --release
+./build_deb.sh                       # -> dist/baxters-iris_<version>_amd64.deb
+sudo dpkg -i dist/baxters-iris_*.deb
+```
+
+Installs to `/opt/baxters/iris/` with a desktop entry, and launches through the
+same `run.sh`. `Depends` are taken from the libraries a **running** instance
+maps, not from `ldd` alone — the binary links only libc and libgcc while
+eframe/winit `dlopen` EGL, Wayland and xkbcommon at startup.
+
+**Only one Iris runs at a time.** A second launch exits immediately saying so:
+two instances contend for the same camera and the same metrics port. The guard
+is an `flock` on `$XDG_RUNTIME_DIR/iris.lock`, released by the kernel on exit,
+so there is no stale lock to clean up after a crash.
+
 ## License
 
 MIT

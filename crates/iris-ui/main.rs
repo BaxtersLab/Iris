@@ -33,6 +33,35 @@ async fn main() {
             iris_core::config::IrisConfig::default()
         }
     };
+    // One Iris at a time. Checked BEFORE bootstrap so a refused instance never
+    // opens the camera, never binds the metrics port, and never starts a
+    // capture thread it is about to throw away.
+    //
+    // Held for the whole run: `_instance` must stay in scope, because dropping
+    // it closes the descriptor and releases the lock.
+    let _instance = match iris_ui::single_instance::acquire() {
+        iris_ui::single_instance::Instance::Acquired(lock) => Some(lock),
+        iris_ui::single_instance::Instance::AlreadyRunning { pid, path } => {
+            match pid {
+                Some(pid) => eprintln!("Iris is already running (pid {pid}); not starting a second copy."),
+                None => eprintln!("Iris is already running; not starting a second copy."),
+            }
+            eprintln!("  lock: {}", path.display());
+            eprintln!("  Two instances contend for the same camera and the same metrics port.");
+            // Exit 0: the user's intent — Iris running — is already satisfied,
+            // and a desktop launcher must not raise an error dialog for a
+            // double click on an app that is already up.
+            return;
+        }
+        iris_ui::single_instance::Instance::Unavailable(e) => {
+            // Deliberately not fatal. See single_instance's module docs: a lock
+            // that cannot be evaluated is a weaker guarantee, not a reason to
+            // refuse to start.
+            eprintln!("single-instance guard unavailable ({e}); continuing without it");
+            None
+        }
+    };
+
     match iris_ui::bootstrap::IrisRuntime::bootstrap(cfg).await {
         Ok(_rt) => {
             // Keep runtime alive while UI runs; pass the IPC handle into the UI so it can send commands and subscribe to telemetry.
@@ -88,7 +117,24 @@ async fn main() {
                 return;
             }
 
-            let options = eframe::NativeOptions::default();
+            // Pin the Wayland app_id / X11 WM_CLASS instead of leaving it to
+            // whatever winit derives. egui's own documentation for
+            // `with_app_id` says it "should match the .desktop file
+            // distributed with your program", and the packaged desktop entry's
+            // StartupWMClass is set to the same string. Without it the shell
+            // cannot match a running window to its launcher and shows a
+            // generic placeholder — the defect GGUF Chatbox hit and fixed the
+            // same way.
+            //
+            // Set rather than observed: this session could not read the app_id
+            // back on a Wayland seat (there is no xprop for a Wayland surface,
+            // and the app does not appear in _NET_CLIENT_LIST), so pinning it
+            // is what makes the match true by construction instead of by
+            // assumption.
+            let options = eframe::NativeOptions {
+                viewport: egui::ViewportBuilder::default().with_app_id("baxters-iris"),
+                ..Default::default()
+            };
             // `run_native`'s error was discarded here. If the window could not
             // be created — no display, no GL context, a compositor refusing the
             // surface — the process carried on with the capture pipeline

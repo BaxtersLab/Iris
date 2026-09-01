@@ -58,17 +58,49 @@ while IFS='=' read -r _name _value; do
     esac
 done < <(env)
 
-# Honour CARGO_TARGET_DIR so a build made outside the tree still launches.
-# (Standard practice on this box is a space-free target dir.)
-TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
-
-APP="$TARGET_DIR/release/iris-ui"
-[[ -x "$APP" ]] || APP="$TARGET_DIR/debug/iris-ui"
-if [[ ! -x "$APP" ]]; then
-    echo "[iris] no binary found under $TARGET_DIR — build first:"
-    echo "[iris]   cargo build --workspace --release"
+# Find the binary. CARGO_TARGET_DIR is consulted FIRST, but only counts if it
+# actually holds an iris-ui; otherwise we fall back to a build beside this
+# script, which is the installed layout (/opt/baxters/iris/target/release).
+#
+# Both halves of that rule were learned the hard way on 2026-08-31.
+#
+#   Checking CARGO_TARGET_DIR as a *single* directory with no fallback broke the
+#   INSTALLED package: a developer shell on this box exports it, so the packaged
+#   app reported "no binary found under /nonexistent" while its own binary sat
+#   right next to the launcher.
+#
+#   Checking beside-the-script FIRST was worse, and quieter: this tree also has
+#   an old ./target/debug/iris-ui from 2026-08-18, so run.sh launched a binary
+#   thirteen days stale and every fix made since appeared not to work. That is
+#   the estate's "stale builds lie" trap, and it cost a debugging round here.
+#
+# Hence: explicit build directory wins when it has something to offer, the
+# script's own directory otherwise, and a warning when the two disagree.
+APP=""
+CANDIDATES=()
+[[ -n "${CARGO_TARGET_DIR:-}" ]] && CANDIDATES+=("$CARGO_TARGET_DIR/release/iris-ui" "$CARGO_TARGET_DIR/debug/iris-ui")
+CANDIDATES+=("$PWD/target/release/iris-ui" "$PWD/target/debug/iris-ui")
+for candidate in "${CANDIDATES[@]}"; do
+    if [[ -x "$candidate" ]]; then APP="$candidate"; break; fi
+done
+if [[ -z "$APP" ]]; then
+    echo "[iris] no iris-ui binary found. Looked in:"
+    printf '[iris]   %s\n' "${CANDIDATES[@]}"
+    echo "[iris] build first:  cargo build --workspace --release"
     exit 1
 fi
+
+# A binary was chosen, but another candidate may be NEWER — the case where a
+# stale build silently masquerades as the current one. Say so rather than let
+# it mislead.
+for candidate in "${CANDIDATES[@]}"; do
+    [[ "$candidate" == "$APP" ]] && continue
+    [[ -x "$candidate" ]] || continue
+    if [[ "$candidate" -nt "$APP" ]]; then
+        echo "[iris] WARNING: $candidate is NEWER than the one being launched."
+        echo "[iris]          launching $APP — rebuild or remove the other to be sure."
+    fi
+done
 
 # Report which iris.toml will actually be used. The search order in
 # IrisConfig::config_search_paths is: the directory holding the executable

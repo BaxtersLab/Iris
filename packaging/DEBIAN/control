@@ -1,0 +1,22 @@
+Package: baxters-iris
+Version: 0.1.1
+Section: video
+Priority: optional
+Architecture: amd64
+Maintainer: Baxters Lab <165753632+Baxterv5@users.noreply.github.com>
+Depends: libc6, libgcc-s1, libegl1, libwayland-client0, libwayland-egl1, libxkbcommon0, libx11-6, libxcb1, libdbus-1-3
+Description: Iris — USB camera capture with live telemetry
+ Deterministic, telemetry-rich camera subsystem: V4L2 enumeration and streaming
+ capture with MJPEG decode, a live preview, and a full outbound telemetry
+ pipeline. Iris is a tool, not a brain — it performs no inference.
+ .
+ Depends were taken from the libraries a RUNNING instance actually maps, not
+ from ldd alone: the binary links only libc6 and libgcc-s1, while eframe/winit
+ dlopen EGL, Wayland and xkbcommon at startup. Declaring only the linked pair
+ would install cleanly and then fail to open a window — the same defect found
+ in Power Goo, whose Depends omitted qt6-wayland.
+ .
+ The GPU stack is deliberately NOT depended on. A live process also maps mesa,
+ libdrm and the NVIDIA driver, but those are provided by whichever driver the
+ host runs; libegl1 pulls the vendor-neutral libglvnd loader, which is the
+ correct dependency for any of them.

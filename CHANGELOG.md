@@ -4,6 +4,29 @@ All notable changes in this workspace since the previous local snapshot.
 
 Unreleased
 ----------
+Packaging, and a crash that packaging exposed — 2026-08-31
+- **`.deb` packaging added** (`packaging/`, `build_deb.sh`): installs to
+  `/opt/baxters/iris/` with a desktop entry, matching the estate's convention.
+  `Depends` derived from the libraries a running instance actually maps, since
+  the binary links only libc6/libgcc-s1 while eframe dlopens EGL, Wayland and
+  xkbcommon. The GPU stack is deliberately not depended on.
+- **A busy metrics port killed the application.** `Server::bind` panics when the
+  address is in use and the release profile is `panic = "abort"`, so launching
+  Iris twice produced a core dump and a desktop crash report. Now `try_bind`,
+  and losing /metrics degrades the app instead of ending it.
+- **Iris is now single-instance.** Two copies contend for the same camera and
+  the same port, so the second refuses to start and says which pid holds the
+  lock. `flock` on `$XDG_RUNTIME_DIR/iris.lock`, not a pid file: the kernel
+  releases it however the process dies, so there is no stale lock to recover.
+- **`run.sh` binary resolution rewritten twice, both times after a real
+  failure.** Preferring `CARGO_TARGET_DIR` alone broke the installed package for
+  anyone with that variable exported; preferring the script's own directory
+  first silently launched a 13-day-old `./target/debug` build and made every
+  fix appear not to work. It now prefers an explicit build directory that
+  actually contains a binary, falls back to the installed layout, and warns
+  when a newer candidate exists.
+- Gate 111 -> 115 passed, 0 failed, 0 warnings.
+
 Duplicate WMF backend removed — 2026-08-31 (returned from the Windows box)
 - `wmf_backend.rs`'s `WmfUvcBackend` no longer implements `UvcBackend`. Its five
   `NotImplemented` stubs were **unreachable dead code** — the only use of the

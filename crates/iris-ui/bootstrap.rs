@@ -417,7 +417,41 @@ impl IrisRuntime {
                 }))
             });
             tokio::spawn(async move {
-                let _ = Server::bind(&addr).serve(svc).await;
+                // `Server::bind` PANICS when the address is taken, and the
+                // release profile is `panic = "abort"`, so a busy port killed
+                // the whole application — camera, UI and all — over an
+                // auxiliary metrics endpoint. Observed 2026-08-31 while
+                // verifying the .deb:
+                //
+                //   thread 'tokio-rt-worker' panicked at hyper server.rs:81:
+                //   error binding to 127.0.0.1:9180: Address already in use
+                //   Aborted (core dumped)
+                //
+                // It also meant two instances of Iris could never run at once,
+                // and that any unrelated program holding 9180 stopped Iris from
+                // starting at all — with the failure surfacing as an abort
+                // rather than as a message about a port.
+                //
+                // `try_bind` returns the error instead. Metrics are a
+                // diagnostic, so losing them degrades the app; it must not end
+                // it. Anything scraping /metrics still finds out, by the
+                // endpoint being absent.
+                match Server::try_bind(&addr) {
+                    Ok(builder) => {
+                        if let Err(e) = builder.serve(svc).await {
+                            eprintln!("metrics endpoint on {addr} stopped: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "metrics endpoint disabled — cannot bind {addr}: {e}"
+                        );
+                        eprintln!(
+                            "  (set METRICS_BIND to another address, or stop whatever holds it; \
+                             Iris continues without /metrics)"
+                        );
+                    }
+                }
             });
         } else {
             println!("Invalid METRICS_BIND '{}', skipping metrics HTTP server", metrics_bind);
