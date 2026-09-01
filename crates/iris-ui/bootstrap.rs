@@ -647,10 +647,52 @@ impl IrisRuntime {
                             };
                             let max_width = param("max_width").unwrap_or(768);
                             let quality = param("quality").unwrap_or(80).clamp(1, 100) as u8;
+                            // The guard is for a DEAD feed, not a slow one.
+                            //
+                            // A stale frame is the one real hazard here: if
+                            // capture has stopped, the ring still holds an image
+                            // from minutes ago, and a model handed that will
+                            // describe it with complete confidence and nothing
+                            // in the answer to say otherwise.
+                            //
+                            // But latency is expected and normal — frames are
+                            // sampled from a feed, not delivered one for one —
+                            // so the limit is deliberately generous. Ten seconds
+                            // catches "capture is not running" while never
+                            // tripping on a feed that is merely slow. Every
+                            // answer carries `age_ms` regardless, so a caller
+                            // that wants to be stricter can be, and
+                            // max_age_ms=0 turns the check off entirely.
+                            let max_age_ms = param("max_age_ms").unwrap_or(10_000);
 
                             let latest = match http_frames.lock() {
                                 Ok(rb) => rb.read_latest().cloned(),
                                 Err(_) => None,
+                            };
+                            let age_ms = latest.as_ref().map(|slot| {
+                                iris_capture::frame::CaptureFrame::now_us()
+                                    .saturating_sub(slot.timestamp_us)
+                                    / 1_000
+                            });
+                            let latest = match (latest, age_ms) {
+                                (Some(slot), Some(age)) if max_age_ms == 0 || age <= max_age_ms as u64 => Some(slot),
+                                (Some(_), Some(age)) => {
+                                    return Ok::<_, Infallible>(
+                                        Response::builder()
+                                            .status(503)
+                                            .header("content-type", "application/json")
+                                            .body(Body::from(format!(
+                                                concat!(
+                                                    "{{\"error\":\"the newest frame is {}ms old ",
+                                                    "(limit {}ms) — is capture running?\",",
+                                                    "\"age_ms\":{}}}"
+                                                ),
+                                                age, max_age_ms, age
+                                            )))
+                                            .unwrap(),
+                                    );
+                                }
+                                _ => None,
                             };
                             let (status, body) = match latest {
                                 None => (
@@ -677,12 +719,14 @@ impl IrisRuntime {
                                                 concat!(
                                                     "{{\"sequence\":{},\"width\":{},",
                                                     "\"height\":{},\"captured_us\":{},",
+                                                    "\"age_ms\":{},",
                                                     "\"mime\":\"{}\",\"data_url\":\"{}\"}}"
                                                 ),
                                                 slot.sequence,
                                                 snap.width,
                                                 snap.height,
                                                 slot.timestamp_us,
+                                                age_ms.unwrap_or(0),
                                                 snap.mime,
                                                 snap.data_url()
                                             ),

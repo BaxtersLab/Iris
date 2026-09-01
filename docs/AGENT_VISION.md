@@ -52,6 +52,7 @@ framing to implement.
 |---|---|---|
 | `max_width` | `768` | Downscale so the image is at most this wide, preserving aspect ratio. `0` disables scaling. Never upscales. |
 | `quality` | `80` | JPEG quality, 1–100. |
+| `max_age_ms` | `10000` | Refuse a frame older than this. `0` disables the check. |
 
 **Why 768 by default.** A vision projector works on tiles a few hundred pixels
 square. Handing it 1920x1080 costs encode time, transfer size and tokens to
@@ -66,8 +67,23 @@ a reason; the camera's full resolution is always available with `max_width=0`.
 | `503` | Nothing captured yet. Iris is running but capture has not produced a frame; start capture. |
 | `500` | The frame could not be converted. The message says why. |
 
-`captured_us` is microseconds since the epoch, so a caller can decide whether a
-frame is too old to act on — which matters for anything reactive.
+Every successful answer carries **`age_ms`** — how old the frame was when it was
+served, computed here so no caller has to reason about clock skew. `captured_us`
+is the absolute capture time if you want it.
+
+### On staleness
+
+**Latency is normal and expected.** Frames are sampled from a live feed; an
+agent sees some of them, not all, and the one it gets is a few tens of
+milliseconds old. Measured on the reference camera: the ring runs at ~31 fps and
+`/frame` answers with frames **15–34 ms old**.
+
+The `max_age_ms` guard is not there to police that. It exists for one case: when
+capture has **stopped**, the ring still holds the last image from whenever it
+stopped, and a model handed that will describe it confidently with nothing to
+indicate the camera is no longer looking. The default of ten seconds catches a
+dead feed without ever tripping on a slow one. Tighten it if your use is
+reactive, or set `max_age_ms=0` if you want the last frame whenever it was.
 
 ## What this is not
 
