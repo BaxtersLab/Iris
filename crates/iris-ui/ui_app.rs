@@ -745,37 +745,7 @@ impl eframe::App for IrisApp {
                     });
                     ui.separator();
 
-                    ui.label(egui::RichText::new("Camera controls").strong());
-                    self.settings_controls_ui(ui);
-
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.label(egui::RichText::new("Capture").strong());
-                    if let Ok(lf) = self.last_frame_info.lock() {
-                        match *lf {
-                            Some((w, h)) => {
-                                ui.label(format!("Frames: {w}x{h}"));
-                            }
-                            None => {
-                                ui.label(egui::RichText::new("No frames yet").weak());
-                            }
-                        }
-                    }
-                    let converted = if self.frames_received == 0 {
-                        0.0
-                    } else {
-                        (self.frames_converted as f64 / self.frames_received as f64) * 100.0
-                    };
-                    ui.label(format!(
-                        "Preview: {} of {} frames drawn ({converted:.0}%)",
-                        self.frames_converted, self.frames_received
-                    ));
-                });
-        }
-
-        CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Cameras").strong());
                     ui.heading("Cameras");
 
                     // Show last scan result
@@ -830,109 +800,43 @@ impl eframe::App for IrisApp {
                             }
                         }
                     });
-                });
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(egui::RichText::new("Camera controls").strong());
+                    self.settings_controls_ui(ui);
 
-                ui.separator();
-
-                ui.vertical(|ui| {
-                    ui.heading("Preview");
-                    // Drain any available capture frames and update preview texture
-                    if let Some(rx) = &mut self.capture_rx {
-                        // Drain first, convert once. See `drain_to_newest`.
-                        let drained = crate::ui_app::drain_to_newest(rx);
-                        self.frames_received += drained.received as u64;
-
-                        if drained.received > 0 {
-                            // A frame arrived, so any pending close is stale.
-                            self.capture_rx_deadline = None;
-                        }
-
-                        if let Some(frame) = drained.newest {
-                            let w = frame.width as usize;
-                            let h = frame.height as usize;
-                            let pixels = frame_to_rgba(&frame);
-                            if pixels.len() == w * h * 4 {
-                                self.frames_converted += 1;
-                                let image = ColorImage::from_rgba_unmultiplied([w, h], &pixels);
-                                // Replace the EXISTING texture's contents in place.
-                                //
-                                // This used to call `ctx.load_texture(...)` every frame,
-                                // which ALLOCATES A NEW TEXTURE each time — it does not
-                                // replace, despite the old comment saying so. Overwriting
-                                // `self.preview_texture` did not free the previous one, so
-                                // the app leaked one full RGBA image (width*height*4) per
-                                // captured frame: ~27 MB/s at 30 fps, 788 MB -> 4.8 GB in
-                                // under a minute. Confirmed with heaptrack: 584.91 MB
-                                // leaked over 476 calls from this exact line, = 1.23 MB
-                                // each = 640*480*4 exactly. `TextureHandle::set` reuses
-                                // the allocation instead.
-                                match &mut self.preview_texture {
-                                    Some(tex) => {
-                                        tex.set(image, egui::TextureOptions::LINEAR);
-                                    }
-                                    None => {
-                                        self.preview_texture = Some(ctx.load_texture(
-                                            "iris_preview",
-                                            image,
-                                            egui::TextureOptions::LINEAR,
-                                        ));
-                                    }
-                                }
-                                if let Ok(mut lf) = self.last_frame_info.lock() {
-                                    *lf = Some((frame.width, frame.height));
-                                }
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(egui::RichText::new("Capture").strong());
+                    if let Ok(lf) = self.last_frame_info.lock() {
+                        match *lf {
+                            Some((w, h)) => {
+                                ui.label(format!("Frames: {w}x{h}"));
+                            }
+                            None => {
+                                ui.label(egui::RichText::new("No frames yet").weak());
                             }
                         }
-
-                        if drained.disconnected {
-                            // Start a short grace period before dropping the receiver
-                            if self.capture_rx_deadline.is_none() {
-                                self.capture_rx_deadline = Some(
-                                    std::time::Instant::now() + std::time::Duration::from_secs(1),
-                                );
-                                println!("IrisApp: capture_rx closed; will drop receiver after 1s unless recovered");
-                            } else if let Some(d) = self.capture_rx_deadline {
-                                if std::time::Instant::now() >= d {
-                                    println!("IrisApp: dropping closed capture_rx after grace period");
-                                    self.capture_rx = None;
-                                    self.capture_rx_deadline = None;
-                                }
-                            }
-                        }
-
-                        self.report_drain_stats();
                     }
-
-                    if let Some(tex) = &self.preview_texture {
-                        let size = tex.size();
-                        let w = size[0] as f32;
-                        let h = size[1] as f32;
-                        let max_w = 320.0;
-                        let max_h = 180.0;
-                        ui.add(
-                            egui::Image::new(tex)
-                                .fit_to_exact_size(egui::vec2(w.min(max_w), h.min(max_h))),
-                        );
-                    } else if let Ok(lf) = self.last_frame_info.lock() {
-                        if let Some((w, h)) = *lf {
-                            ui.label(format!("Last frame: {}x{}", w, h));
-                        } else {
-                            ui.label("No frames yet");
-                        }
-                    }
+                    let converted = if self.frames_received == 0 {
+                        0.0
+                    } else {
+                        (self.frames_converted as f64 / self.frames_received as f64) * 100.0
+                    };
+                    ui.label(format!(
+                        "Preview: {} of {} frames drawn ({converted:.0}%)",
+                        self.frames_converted, self.frames_received
+                    ));
                 });
-            });
+        }
 
-            ui.separator();
-
-            // The log is a HEARTBEAT, not a record.
-            //
-            // It used to render the last 200 entries in an unbounded scroll
-            // area, so it took most of the window and pushed the preview — the
-            // thing the application is for — into a corner. Three lines is
-            // enough to answer the only question it needs to answer at a
-            // glance: is the camera rolling? The full stream is still on
-            // stdout, where a log belongs.
+        // The activity log: a bottom panel ABOVE the strip, so the preview gets
+        // every pixel that is left rather than sharing a row with a list.
+        //
+        // Panels are laid out in the order they are declared, so the strip
+        // (declared first) sits at the very bottom and this sits on top of it.
+        TopBottomPanel::bottom("activity_strip").show(ctx, |ui| {
+            ui.add_space(1.0);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Activity").small().strong());
                 if let Ok(lg) = self.log.lock() {
@@ -947,13 +851,122 @@ impl eframe::App for IrisApp {
                 if lg.is_empty() {
                     ui.label(egui::RichText::new("nothing yet").small().weak().italics());
                 } else {
-                    // Newest first: the most recent line is the one being
-                    // watched, so it goes where the eye already is rather than
-                    // three rows down.
+                    // Newest first: the line being watched goes where the eye
+                    // already is, rather than three rows down.
                     for line in lg.iter().rev().take(3) {
-                        ui.label(egui::RichText::new(truncate_log_line(line)).small().monospace());
+                        ui.label(
+                            egui::RichText::new(truncate_log_line(line))
+                                .small()
+                                .monospace(),
+                        );
                     }
                 }
+            }
+            ui.add_space(1.0);
+        });
+
+        // Everything left over is the preview.
+        CentralPanel::default().show(ctx, |ui| {
+            if let Some(rx) = &mut self.capture_rx {
+                // Drain first, convert once. See `drain_to_newest`.
+                let drained = crate::ui_app::drain_to_newest(rx);
+                self.frames_received += drained.received as u64;
+
+                if drained.received > 0 {
+                    // A frame arrived, so any pending close is stale.
+                    self.capture_rx_deadline = None;
+                }
+
+                if let Some(frame) = drained.newest {
+                    let w = frame.width as usize;
+                    let h = frame.height as usize;
+                    let pixels = frame_to_rgba(&frame);
+                    if pixels.len() == w * h * 4 {
+                        self.frames_converted += 1;
+                        let image = ColorImage::from_rgba_unmultiplied([w, h], &pixels);
+                        // Replace the EXISTING texture's contents in place.
+                        //
+                        // This used to call `ctx.load_texture(...)` every frame,
+                        // which ALLOCATES A NEW TEXTURE each time — it does not
+                        // replace, despite the old comment saying so. Overwriting
+                        // `self.preview_texture` did not free the previous one, so
+                        // the app leaked one full RGBA image (width*height*4) per
+                        // captured frame: ~27 MB/s at 30 fps, 788 MB -> 4.8 GB in
+                        // under a minute. Confirmed with heaptrack: 584.91 MB
+                        // leaked over 476 calls from this exact line, = 1.23 MB
+                        // each = 640*480*4 exactly. `TextureHandle::set` reuses
+                        // the allocation instead.
+                        match &mut self.preview_texture {
+                            Some(tex) => {
+                                tex.set(image, egui::TextureOptions::LINEAR);
+                            }
+                            None => {
+                                self.preview_texture = Some(ctx.load_texture(
+                                    "iris_preview",
+                                    image,
+                                    egui::TextureOptions::LINEAR,
+                                ));
+                            }
+                        }
+                        if let Ok(mut lf) = self.last_frame_info.lock() {
+                            *lf = Some((frame.width, frame.height));
+                        }
+                    }
+                }
+
+                if drained.disconnected {
+                    // Start a short grace period before dropping the receiver
+                    if self.capture_rx_deadline.is_none() {
+                        self.capture_rx_deadline = Some(
+                            std::time::Instant::now() + std::time::Duration::from_secs(1),
+                        );
+                        println!("IrisApp: capture_rx closed; will drop receiver after 1s unless recovered");
+                    } else if let Some(d) = self.capture_rx_deadline {
+                        if std::time::Instant::now() >= d {
+                            println!("IrisApp: dropping closed capture_rx after grace period");
+                            self.capture_rx = None;
+                            self.capture_rx_deadline = None;
+                        }
+                    }
+                }
+
+                self.report_drain_stats();
+            }
+
+            // Fill the available space, keeping the frame's aspect ratio.
+            //
+            // This was pinned to a 320x180 box beside a camera list, so the
+            // window could not usefully be made smaller — the list held the
+            // width open — and making it larger gained nothing, because the
+            // preview stayed 320 wide in the middle of the empty space.
+            let avail = ui.available_size();
+            if let Some(tex) = &self.preview_texture {
+                let size = tex.size();
+                let (tw, th) = (size[0] as f32, size[1] as f32);
+                if tw > 0.0 && th > 0.0 && avail.x > 1.0 && avail.y > 1.0 {
+                    let scale = (avail.x / tw).min(avail.y / th);
+                    let shown = egui::vec2(tw * scale, th * scale);
+                    // Centred, so the leftover space is even on both sides
+                    // instead of pooling on the right.
+                    let offset = (avail.x - shown.x) * 0.5;
+                    ui.horizontal(|ui| {
+                        if offset > 0.0 {
+                            ui.add_space(offset);
+                        }
+                        ui.add(egui::Image::new(tex).fit_to_exact_size(shown));
+                    });
+                }
+            } else {
+                ui.centered_and_justified(|ui| {
+                    let msg = match self.last_frame_info.lock() {
+                        Ok(lf) => match *lf {
+                            Some((w, h)) => format!("waiting for frames — last was {w}x{h}"),
+                            None => "no frames yet".to_string(),
+                        },
+                        Err(_) => "no frames yet".to_string(),
+                    };
+                    ui.label(egui::RichText::new(msg).weak().italics());
+                });
             }
         });
 

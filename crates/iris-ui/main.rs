@@ -132,7 +132,22 @@ async fn main() {
             // and the app does not appear in _NET_CLIENT_LIST), so pinning it
             // is what makes the match true by construction instead of by
             // assumption.
-            let mut viewport = egui::ViewportBuilder::default().with_app_id("baxters-iris");
+            // Window sizing.
+            //
+            // A minimum, because the control strip must never be clipped: the
+            // buttons are the one part of the window with no keyboard-only
+            // substitute for a new user, and a window that can be dragged
+            // smaller than them hides the app's only controls. 380x300 keeps
+            // Start / Stop / Detect Cameras and the settings gear on one row,
+            // with room left for a usable preview and the three activity lines.
+            //
+            // A modest default, because the layout now collapses cleanly: the
+            // preview fills whatever is left, so a smaller starting window
+            // shows the same things, just smaller.
+            let mut viewport = egui::ViewportBuilder::default()
+                .with_app_id("baxters-iris")
+                .with_min_inner_size([380.0, 300.0])
+                .with_inner_size([720.0, 540.0]);
             match load_window_icon() {
                 Ok(icon) => viewport = viewport.with_icon(icon),
                 // Not fatal. A window with the default icon is a cosmetic
