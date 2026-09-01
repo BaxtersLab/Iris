@@ -77,36 +77,47 @@ than left silently incomplete. Format:
 
 ## Windows (WMF) — camera controls, opened 2026-08-31
 
-- [ ] STUB: `iris-hal/backend.rs` — `WmfBackend::get_control` and
-      `WmfBackend::set_control` return
-      `Err(HalError::Io("camera controls not yet implemented for WMF"))`, and
-      `list_controls` returns an empty vec. **So Windows camera controls do not
-      work at all**, and `iris-control`'s capability queries have nothing to read
-      on that platform. The Linux V4L2 side implements these (`G_CTRL`/`S_CTRL`/
-      `QUERYCTRL`, 11 controls enumerated on the reference camera), so this is a
-      genuine platform gap rather than a missing feature everywhere.
+- [x] **DONE 2026-08-31 on the Windows box** — ~~STUB: `WmfBackend::get_control`
+      /`set_control`/`list_controls`~~. Implemented against `IAMVideoProcAmp` and
+      `IAMCameraControl`, proven on the reference camera: **10 controls** with the
+      driver's own ranges (gamma to 499, white balance 2800–6500 K, exposure
+      negative log2 seconds), and a write read back changed. Linux sees 11 via
+      V4L2; different API surfaces, both real.
 
-      Found by the Windows agent on 2026-08-31 while resolving the duplicate
-      backend above, and **declared rather than fixed** — it was outside that
-      item's scope. It is *not* the same class of defect as the duplicate: these
-      are on the real backend and they fail loudly with a clear message rather
-      than masquerading as an unimplemented trait method.
+      **`control_id` is platform-defined**: `(namespace << 16) | property`,
+      namespace 0 = `IAMVideoProcAmp`, 1 = `IAMCameraControl`. Mapping onto
+      `V4L2_CID_*` was considered and rejected — no caller in the workspace
+      hardcodes a control id (every consumer reads `list_controls` first), and
+      the two sets are not in bijection, so a shared numbering would need
+      invented ids that *look* like V4L2 CIDs and are not. `list_controls` is
+      self-describing, so a caller never needs to know the encoding.
 
-      Needs a Windows box.
+      Two findings worth keeping. **`open_device` was dropping the
+      `IMFMediaSource`** after handing it to the source reader, and both control
+      interfaces are obtained by QueryInterface *on the source* — `WmfState` now
+      retains it. And **`set_control` must set the manual flag**: leaving auto
+      engaged lets the driver overwrite the value on the next frame, so the set
+      appears to succeed and silently does not hold.
 
 ## Windows — single-instance guard, opened 2026-08-31
 
-- [ ] STUB: `iris-ui/single_instance.rs` — `acquire()` is implemented for unix
-      only (`flock(2)` on `$XDG_RUNTIME_DIR/iris.lock`). The `cfg(not(unix))`
-      arm returns `Instance::Unavailable`, so **on Windows the guard does not
-      run and a second Iris can still start.**
-      The Windows equivalent is a named mutex — `CreateMutexW` with a fixed
-      name, treating `ERROR_ALREADY_EXISTS` as "another instance holds it".
-      Not written here because this box cannot build or run the Windows target,
-      and an unrunnable guard is worse than a declared gap.
-      **Consequences on Windows today are milder than they were on Linux:** the
-      metrics bind is now non-fatal on both platforms, so a second instance no
-      longer aborts the process — it merely contends for the camera.
+- [x] **DONE 2026-08-31 on the Windows box** — ~~STUB: `single_instance::acquire()`
+      is unix-only~~. A named mutex, `Local\BaxtersLab.Iris.SingleInstance`,
+      chosen for the property that made `flock` right on unix: **the kernel
+      releases it however the process dies**, so no stale state survives a hard
+      kill. Proven by `TerminateProcess`-ing the first instance and starting a
+      fresh one — the case a pid file fails.
+      `Local\` rather than `Global\` so one signed-in user's Iris cannot block
+      another's, matching the per-uid `/tmp` fallback on unix. The handle
+      returned on `ERROR_ALREADY_EXISTS` is closed immediately rather than held.
+
+- [ ] UNVERIFIED: the **cfg gating** of `single_instance`'s unix-only path tests
+      is compile-verified on Linux but **not** on Windows. `iris-ui` cannot be
+      cross-checked from the Linux box — `reqwest` pulls `ring`, whose build
+      script needs a Windows C toolchain — so `cargo check --target
+      x86_64-pc-windows-gnu` covers `iris-core`, `iris-hal` and
+      `iris-ipc-pipe-bridge` only. Confirm on the next Windows round that
+      `cargo test --workspace` is **0 failed** there.
 
 ## Unbuilt crates — declared 2026-08-31
 
@@ -141,13 +152,16 @@ contribute **zero tests** — a question a green workspace total cannot answer.
       genuinely missing is **frame** fan-out beyond one consumer, plus the
       shared-memory and IPC transports.
 
-- [ ] GAP: `iris-ipc-pipe-bridge` is **not a Cargo workspace member**, so
-      `cargo build --workspace` and `cargo test --workspace` have never covered
-      its 308 lines, and it has **no tests of its own**. `IRIS_LINUX_NOTES.md`
-      records a container-verified UDS loopback smoke pass that has not been
-      re-run on this box. Its `Cargo.lock` is deliberately gitignored because
-      nothing here has ever resolved it. Build it, test it, then either add it
-      to `members` or record why it stands outside.
+- [x] **DONE 2026-08-31** — ~~GAP: `iris-ipc-pipe-bridge` is not a Cargo
+      workspace member~~. It carried an empty `[workspace]` table making it its
+      own root, so no gate had ever built its 308 lines and it had drifted to 8
+      warnings. Now a member with 5 tests, and its UDS transport proven on this
+      box (`UDS SMOKE OK`) rather than only in a container. Its separate
+      `Cargo.lock` is deleted — the workspace lock governs it.
+
+      *(This entry itself sat stale for the rest of the session after the work
+      landed, which is the failure mode the whole file exists to prevent. Closed
+      when the round-2 review re-read it.)*
 
 ## GUI memory leak — FOUND AND FIXED (2026-08-01, Linux workstation)
 

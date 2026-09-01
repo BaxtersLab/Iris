@@ -4,6 +4,28 @@ All notable changes in this workspace since the previous local snapshot.
 
 Unreleased
 ----------
+Windows parity — 2026-08-31 (round 2 returned)
+- **Windows camera controls implemented** against `IAMVideoProcAmp` and
+  `IAMCameraControl`: 10 controls on the reference camera with the driver's own
+  ranges, and a write read back changed. `control_id` is platform-defined,
+  `(namespace << 16) | property`; `list_controls` is self-describing so callers
+  never need the encoding. `open_device` was dropping the `IMFMediaSource` that
+  both control interfaces are obtained from — `WmfState` now retains it.
+  `set_control` sets the manual flag, or the driver overwrites the value on the
+  next frame and the set silently does not hold.
+- **Single-instance guard on Windows**: a named mutex,
+  `Local\BaxtersLab.Iris.SingleInstance`, proven against a hard kill.
+- **Five tests and one product gap that shipped broken on Windows, fixed.**
+  Three pipe-bridge socket-path tests asserted forward-slash strings where
+  `PathBuf::join` uses a backslash; `single_instance::lock_path` and its tests
+  assumed `Path::is_absolute()` is true for a unix path; and
+  `config_search_paths` read only `XDG_CONFIG_HOME`/`HOME`, so **Windows had no
+  per-user config location at all**. The unix-only pieces are now `cfg(unix)`
+  and `per_user_config_dir` branches on `APPDATA`/`USERPROFILE`.
+- Verified with `cargo check --tests --target x86_64-pc-windows-gnu` on the
+  crates that can be cross-compiled: zero warnings.
+- Linux gate unchanged at 115 passed, 0 failed, 0 warnings.
+
 Packaging, and a crash that packaging exposed — 2026-08-31
 - **`.deb` packaging added** (`packaging/`, `build_deb.sh`): installs to
   `/opt/baxters/iris/` with a desktop entry, matching the estate's convention.

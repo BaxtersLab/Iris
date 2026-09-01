@@ -113,10 +113,26 @@ Ubuntu 26.04, and **91 passing, 0 failing, zero warnings** on Windows 10 — the
 difference is 14 Linux-only tests (the V4L2 backend and its hardware paths)
 against 2 Windows-only ones.
 
-Remaining declared work is in `ROADMAP.md`. The one open item is that **camera
-controls are not implemented on Windows** — `WmfBackend::get_control`/
-`set_control` return an error and `list_controls` is empty, where the Linux V4L2
-side implements them fully. Needs a Windows box.
+**Camera controls work on both platforms** — V4L2 `G_CTRL`/`S_CTRL`/`QUERYCTRL`
+on Linux (11 controls on the reference camera), `IAMVideoProcAmp` and
+`IAMCameraControl` on Windows (10 on the same camera, through a different API).
+`control_id` is platform-defined; read `list_controls`, which reports id, name
+and real min/max/step/default, rather than hardcoding a number.
+
+**Only one Iris runs at a time on either platform** — `flock` on unix, a named
+mutex on Windows. Both were chosen for the same property: the kernel releases
+them however the process dies, so a hard kill leaves nothing stale behind.
+
+Remaining declared work is in `ROADMAP.md`, and it is two unbuilt crates
+(`iris-control`, `iris-stream`) that expose no API and are documented as such.
+
+### Cross-checking the other platform
+
+`cargo check --target x86_64-pc-windows-gnu` from Linux catches a surprising
+amount — unix-only assumptions in tests, `PathBuf::join` separators, ungated
+functions that warn as unused. It covers `iris-core`, `iris-hal` and
+`iris-ipc-pipe-bridge`; `iris-ui` cannot be cross-checked because `reqwest`
+pulls `ring`, whose build script needs a Windows C toolchain.
 
 ## Install
 
