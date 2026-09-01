@@ -42,8 +42,29 @@ pub enum Instance {
 /// Holds the lock open. The lock lives as long as this value.
 #[derive(Debug)]
 pub struct InstanceLock {
+    /// unix: the flock`ed file. The lock lives exactly as long as this.
+    #[cfg(unix)]
     _file: std::fs::File,
+    /// windows: the named mutex. Same contract — Windows releases it when the
+    /// process exits, including on a hard kill, which is why a mutex was
+    /// chosen over a pid file for the same reason `flock` was on unix.
+    #[cfg(windows)]
+    _handle: MutexHandle,
     pub path: PathBuf,
+}
+
+/// Owns the named mutex and closes it on drop.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct MutexHandle(pub(crate) isize);
+
+#[cfg(windows)]
+impl Drop for MutexHandle {
+    fn drop(&mut self) {
+        // Closing the handle releases the mutex. The OS would do this at
+        // process exit anyway; doing it here keeps the lifetime explicit.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
 }
 
 /// Where the lock file lives, with the environment passed in rather than read.
@@ -109,7 +130,55 @@ pub fn acquire() -> Instance {
     Instance::Acquired(InstanceLock { _file: file, path })
 }
 
-#[cfg(not(unix))]
+
+/// The Windows name for the single-instance mutex.
+///
+/// `Local\` scopes it to the login session, which is what we want: two
+/// different users signed into the same machine each get their own Iris, the
+/// same way the unix `/tmp` fallback is per-uid. A `Global\` name would let one
+/// user's Iris block another's.
+#[cfg(windows)]
+pub const MUTEX_NAME: &str = r"Local\BaxtersLab.Iris.SingleInstance";
+
+/// Windows single-instance guard: a named mutex.
+///
+/// Chosen for the same property that made `flock` right on unix — **the kernel
+/// releases it however the process dies.** A pid file left behind by a hard
+/// kill blocks every future start; a mutex handle is closed by the OS at
+/// process teardown, crash included, so there is no stale state to clean up.
+///
+/// `CreateMutexW` succeeds either way; the discriminator is
+/// `ERROR_ALREADY_EXISTS` from `GetLastError`, which means someone else created
+/// it first. In that case the handle we just received is closed immediately —
+/// keeping it would hold a second reference to a mutex we do not own.
+#[cfg(windows)]
+pub fn acquire() -> Instance {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+
+    let wide: Vec<u16> = MUTEX_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    // bInitialOwner = false: ownership is irrelevant here. Existence is the
+    // signal, and not owning it avoids the abandoned-mutex state entirely.
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+    if handle == 0 {
+        return Instance::Unavailable(std::io::Error::last_os_error());
+    }
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        // Another Iris created it. Close our reference and report it.
+        unsafe { CloseHandle(handle) };
+        return Instance::AlreadyRunning {
+            // A named mutex carries no payload, so there is no pid to report.
+            // `main.rs` already handles `None`.
+            pid: None,
+            path: PathBuf::from(MUTEX_NAME),
+        };
+    }
+    Instance::Acquired(InstanceLock {
+        _handle: MutexHandle(handle),
+        path: PathBuf::from(MUTEX_NAME),
+    })
+}
+#[cfg(all(not(unix), not(windows)))]
 pub fn acquire() -> Instance {
     // Windows needs a named mutex (CreateMutexW + ERROR_ALREADY_EXISTS) rather
     // than flock. Not implemented here because this box cannot build or run the
@@ -184,5 +253,58 @@ mod tests {
 
         drop(second);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Windows guard must actually refuse a second acquire.
+    ///
+    /// `CreateMutexW` reports `ERROR_ALREADY_EXISTS` regardless of which
+    /// process created the mutex first, so holding one and asking again inside
+    /// a single test exercises the real discriminator rather than a simulation
+    /// of it.
+    #[cfg(windows)]
+    #[test]
+    fn a_second_acquire_is_refused_while_the_first_is_held() {
+        let first = super::acquire();
+        let _held = match first {
+            super::Instance::Acquired(lock) => lock,
+            other => panic!("expected to acquire the mutex first, got {other:?}"),
+        };
+        match super::acquire() {
+            super::Instance::AlreadyRunning { pid, path } => {
+                assert!(pid.is_none(), "a named mutex carries no pid, got {pid:?}");
+                assert_eq!(path, std::path::PathBuf::from(super::MUTEX_NAME));
+            }
+            other => panic!("second acquire must be refused, got {other:?}"),
+        }
+    }
+
+    /// Releasing the handle must free the name again — this is the property
+    /// that makes a hard kill recoverable, since Windows closes handles at
+    /// process teardown.
+    #[cfg(windows)]
+    #[test]
+    fn releasing_the_handle_frees_the_name() {
+        match super::acquire() {
+            super::Instance::Acquired(lock) => drop(lock),
+            other => panic!("expected to acquire, got {other:?}"),
+        }
+        match super::acquire() {
+            super::Instance::Acquired(_) => {}
+            other => panic!("the name must be free after the handle is dropped, got {other:?}"),
+        }
+    }
+
+    /// `Local\` scopes the mutex to the login session. `Global\` would let one
+    /// signed-in user's Iris block another's, which the per-uid `/tmp`
+    /// fallback on unix deliberately avoids.
+    #[cfg(windows)]
+    #[test]
+    fn the_mutex_is_session_scoped_not_machine_wide() {
+        assert!(
+            super::MUTEX_NAME.starts_with(r"Local\"),
+            "expected a Local-scoped name, got {}",
+            super::MUTEX_NAME
+        );
+        assert!(!super::MUTEX_NAME.starts_with(r"Global\"));
     }
 }

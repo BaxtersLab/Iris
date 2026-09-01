@@ -149,7 +149,9 @@ mod wmf {
     use crate::error::{HalError, HalResult};
     use std::sync::Mutex as StdMutex;
     use windows::core::GUID;
+    use windows::core::Interface;
     use windows::Win32::Media::MediaFoundation::*;
+    use windows::Win32::Media::DirectShow::*;
     use windows::Win32::System::Com::*;
 
     // MF GUID constants
@@ -191,6 +193,11 @@ mod wmf {
 
     struct WmfState {
         reader: Option<IMFSourceReader>,
+        /// Kept solely so camera controls can reach it: `IAMVideoProcAmp` and
+        /// `IAMCameraControl` are obtained by QueryInterface on the media
+        /// SOURCE, not on the reader. Before controls existed, `open_device`
+        /// created the source and then dropped it.
+        source: Option<IMFMediaSource>,
         device_id: Option<String>,
         current_width: u32,
         current_height: u32,
@@ -210,6 +217,11 @@ mod wmf {
     struct SendReader(IMFSourceReader);
     unsafe impl Send for SendReader {}
 
+    /// Same contract as [`SendReader`], for the media source that camera
+    /// controls are queried from.
+    struct SendSource(IMFMediaSource);
+    unsafe impl Send for SendSource {}
+
     pub struct WmfBackend {
         state: StdMutex<WmfState>,
     }
@@ -227,6 +239,7 @@ mod wmf {
             Ok(WmfBackend {
                 state: StdMutex::new(WmfState {
                     reader: None,
+                    source: None,
                     device_id: None,
                     current_width: 0,
                     current_height: 0,
@@ -241,6 +254,7 @@ mod wmf {
             {
                 let mut st = self.state.lock().unwrap();
                 st.reader = None;
+                st.source = None;
             }
             unsafe {
                 let _ = MFShutdown();
@@ -330,6 +344,77 @@ mod wmf {
         })
     }
 
+    /// The Windows camera-control surface, and the `control_id` decision.
+    ///
+    /// **`control_id` is platform-defined, and deliberately so.** V4L2 uses
+    /// kernel `V4L2_CID_*` integers; Media Foundation has no equivalent
+    /// numbering, exposing controls through two unrelated DirectShow
+    /// interfaces — `IAMVideoProcAmp` (image properties) and
+    /// `IAMCameraControl` (lens/mechanism) — each with its own small enum
+    /// starting at 0. So the two namespaces overlap numerically while meaning
+    /// entirely different things.
+    ///
+    /// The alternative was to map Windows properties onto `V4L2_CID_*` values
+    /// so one number worked on both platforms. That was rejected because:
+    ///
+    /// * no caller in this workspace hardcodes a control id — every consumer
+    ///   reads `list_controls` first and uses the ids it returns, so a shared
+    ///   numbering buys nothing today; and
+    /// * the sets are not in bijection. V4L2 exposes controls Media Foundation
+    ///   has no property for and vice versa, so a shared numbering would need
+    ///   invented ids for the unmatched ones — numbers that look like V4L2 CIDs
+    ///   but are not, which is a worse trap than two honestly separate spaces.
+    ///
+    /// The id is therefore `(namespace << 16) | property`, with namespace 0 =
+    /// `IAMVideoProcAmp` and 1 = `IAMCameraControl`. The shift keeps the two
+    /// enums from colliding, and `list_controls` is self-describing: it returns
+    /// the id together with a name and real min/max/step/default read from the
+    /// driver, so a caller never needs to know the encoding.
+    const NS_PROC_AMP: u32 = 0;
+    const NS_CAMERA_CONTROL: u32 = 1;
+
+    /// Every property this backend can address, with the name reported to
+    /// callers. Order is the order `list_controls` reports.
+    const WMF_CONTROLS: &[(u32, i32, &str)] = &[
+        // IAMVideoProcAmp — image processing
+        (NS_PROC_AMP, VideoProcAmp_Brightness.0, "brightness"),
+        (NS_PROC_AMP, VideoProcAmp_Contrast.0, "contrast"),
+        (NS_PROC_AMP, VideoProcAmp_Hue.0, "hue"),
+        (NS_PROC_AMP, VideoProcAmp_Saturation.0, "saturation"),
+        (NS_PROC_AMP, VideoProcAmp_Sharpness.0, "sharpness"),
+        (NS_PROC_AMP, VideoProcAmp_Gamma.0, "gamma"),
+        (NS_PROC_AMP, VideoProcAmp_ColorEnable.0, "color_enable"),
+        (NS_PROC_AMP, VideoProcAmp_WhiteBalance.0, "white_balance"),
+        (NS_PROC_AMP, VideoProcAmp_BacklightCompensation.0, "backlight_compensation"),
+        (NS_PROC_AMP, VideoProcAmp_Gain.0, "gain"),
+        // IAMCameraControl — lens and mechanism
+        (NS_CAMERA_CONTROL, CameraControl_Pan.0, "pan"),
+        (NS_CAMERA_CONTROL, CameraControl_Tilt.0, "tilt"),
+        (NS_CAMERA_CONTROL, CameraControl_Roll.0, "roll"),
+        (NS_CAMERA_CONTROL, CameraControl_Zoom.0, "zoom"),
+        (NS_CAMERA_CONTROL, CameraControl_Exposure.0, "exposure"),
+        (NS_CAMERA_CONTROL, CameraControl_Iris.0, "iris"),
+        (NS_CAMERA_CONTROL, CameraControl_Focus.0, "focus"),
+    ];
+
+    fn encode_control_id(ns: u32, prop: i32) -> u32 {
+        (ns << 16) | (prop as u32 & 0xFFFF)
+    }
+
+    fn decode_control_id(id: u32) -> (u32, i32) {
+        ((id >> 16), (id & 0xFFFF) as i32)
+    }
+
+    /// The two control interfaces, if the device offers them.
+    ///
+    /// A camera commonly implements one and not the other — a fixed-lens
+    /// webcam has `IAMVideoProcAmp` but no pan/tilt — so a missing interface
+    /// is normal and must not be an error at enumeration time.
+    unsafe fn control_interfaces(
+        source: &IMFMediaSource,
+    ) -> (Option<IAMVideoProcAmp>, Option<IAMCameraControl>) {
+        (source.cast().ok(), source.cast().ok())
+    }
     #[async_trait]
     impl UvcBackend for WmfBackend {
         async fn enumerate_devices(&self) -> HalResult<Vec<DeviceInfo>> {
@@ -401,7 +486,7 @@ mod wmf {
             // move the resulting objects back into our Mutex-protected state.
             // This is safe because WmfState has unsafe Send/Sync and the reader
             // will only be used under the state mutex or in spawn_blocking.
-            let (reader, fd) = tokio::task::spawn_blocking(move || unsafe {
+            let (reader, source, fd) = tokio::task::spawn_blocking(move || unsafe {
                 let activates = enumerate_video_devices()?;
                 let activate = activates
                     .into_iter()
@@ -432,13 +517,14 @@ mod wmf {
                     pixel_format: PixelFormat::Bgr24,
                 });
 
-                Ok::<_, HalError>((SendReader(reader), fd))
+                Ok::<_, HalError>((SendReader(reader), SendSource(source), fd))
             })
             .await
             .map_err(|e| HalError::Io(format!("spawn_blocking: {e}")))??;
 
             let mut st = self.state.lock().unwrap();
             st.reader = Some(reader.0);
+            st.source = Some(source.0);
             st.device_id = Some(id.0.clone());
             st.current_width = fd.width;
             st.current_height = fd.height;
@@ -452,6 +538,7 @@ mod wmf {
                 return Err(HalError::DeviceNotOpen);
             }
             st.reader = None;
+            st.source = None;
             st.device_id = None;
             Ok(())
         }
@@ -543,8 +630,56 @@ mod wmf {
                 .map_err(|e| HalError::Io(format!("spawn_blocking: {e}")))?
         }
 
-        async fn list_controls(&self, _id: &DeviceId) -> HalResult<Vec<ControlCapabilityInfo>> {
-            Ok(vec![])
+        /// Enumerate the controls this camera actually exposes.
+        ///
+        /// `GetRange` is asked for every property in [`WMF_CONTROLS`]; the ones
+        /// the device does not implement fail and are skipped, so the returned
+        /// list reflects the hardware rather than the table. min/max/step/
+        /// default all come from the driver — nothing is invented.
+        async fn list_controls(&self, id: &DeviceId) -> HalResult<Vec<ControlCapabilityInfo>> {
+            let want = id.0.clone();
+            let source = {
+                let st = self.state.lock().unwrap();
+                if st.device_id.as_deref() != Some(&want) {
+                    return Err(HalError::DeviceNotOpen);
+                }
+                SendSource(st.source.clone().ok_or(HalError::DeviceNotOpen)?)
+            };
+            tokio::task::spawn_blocking(move || unsafe {
+                // Bind the wrapper whole: Rust 2021 disjoint capture would otherwise
+                // capture only `source.0`, an IMFMediaSource, and bypass the
+                // `unsafe impl Send for SendSource`.
+                let source = source;
+                let (amp, cam) = control_interfaces(&source.0);
+                let mut out = Vec::new();
+                for (ns, prop, name) in WMF_CONTROLS {
+                    let (mut mn, mut mx, mut step, mut def, mut caps) = (0i32, 0i32, 0i32, 0i32, 0i32);
+                    let ok = match *ns {
+                        NS_PROC_AMP => amp.as_ref().map(|a| {
+                            a.GetRange(*prop, &mut mn, &mut mx, &mut step, &mut def, &mut caps)
+                        }),
+                        _ => cam.as_ref().map(|c| {
+                            c.GetRange(*prop, &mut mn, &mut mx, &mut step, &mut def, &mut caps)
+                        }),
+                    };
+                    // A property the device does not implement returns an error
+                    // here. That is not a failure of enumeration: skip it.
+                    if !matches!(ok, Some(Ok(()))) {
+                        continue;
+                    }
+                    out.push(ControlCapabilityInfo {
+                        id: encode_control_id(*ns, *prop),
+                        name: (*name).to_string(),
+                        min: mn as i64,
+                        max: mx as i64,
+                        step: step as i64,
+                        default: def as i64,
+                    });
+                }
+                Ok::<_, HalError>(out)
+            })
+            .await
+            .map_err(|e| HalError::Io(format!("spawn_blocking join error: {e:?}")))?
         }
 
         async fn current_format(
@@ -563,21 +698,90 @@ mod wmf {
             }))
         }
 
-        async fn get_control(&self, _id: &DeviceId, _control_id: u32) -> HalResult<i64> {
-            Err(HalError::Io(
-                "camera controls not yet implemented for WMF".into(),
-            ))
+        async fn get_control(&self, id: &DeviceId, control_id: u32) -> HalResult<i64> {
+            let want = id.0.clone();
+            let source = {
+                let st = self.state.lock().unwrap();
+                if st.device_id.as_deref() != Some(&want) {
+                    return Err(HalError::DeviceNotOpen);
+                }
+                SendSource(st.source.clone().ok_or(HalError::DeviceNotOpen)?)
+            };
+            tokio::task::spawn_blocking(move || unsafe {
+                // See the note in `list_controls`: bind the wrapper whole so the
+                // closure captures `SendSource`, not the COM pointer inside it.
+                let source = source;
+                let (ns, prop) = decode_control_id(control_id);
+                let (amp, cam) = control_interfaces(&source.0);
+                let (mut value, mut flags) = (0i32, 0i32);
+                let r = match ns {
+                    NS_PROC_AMP => amp
+                        .as_ref()
+                        .ok_or_else(|| HalError::InvalidParameter(
+                            "this camera exposes no IAMVideoProcAmp interface".into()))?
+                        .Get(prop, &mut value, &mut flags),
+                    NS_CAMERA_CONTROL => cam
+                        .as_ref()
+                        .ok_or_else(|| HalError::InvalidParameter(
+                            "this camera exposes no IAMCameraControl interface".into()))?
+                        .Get(prop, &mut value, &mut flags),
+                    other => return Err(HalError::InvalidParameter(format!(
+                        "control id {control_id:#x} names namespace {other}, which does not exist"))),
+                };
+                r.map_err(|e| HalError::Io(format!("control get ({control_id:#x}): {e}")))?;
+                Ok::<_, HalError>(value as i64)
+            })
+            .await
+            .map_err(|e| HalError::Io(format!("spawn_blocking join error: {e:?}")))?
         }
 
+        /// Set a control to `value`.
+        ///
+        /// Always sets the **manual** flag: a caller asking for a specific
+        /// value wants that value, and leaving auto engaged means the driver
+        /// overwrites it on the next frame — the set would appear to succeed
+        /// and then silently not hold.
         async fn set_control(
             &self,
-            _id: &DeviceId,
-            _control_id: u32,
-            _value: i64,
+            id: &DeviceId,
+            control_id: u32,
+            value: i64,
         ) -> HalResult<()> {
-            Err(HalError::Io(
-                "camera controls not yet implemented for WMF".into(),
-            ))
+            let want = id.0.clone();
+            let source = {
+                let st = self.state.lock().unwrap();
+                if st.device_id.as_deref() != Some(&want) {
+                    return Err(HalError::DeviceNotOpen);
+                }
+                SendSource(st.source.clone().ok_or(HalError::DeviceNotOpen)?)
+            };
+            let v = i32::try_from(value)
+                .map_err(|_| HalError::Io(format!("control value {value} out of range for WMF")))?;
+            tokio::task::spawn_blocking(move || unsafe {
+                // See the note in `list_controls`: bind the wrapper whole so the
+                // closure captures `SendSource`, not the COM pointer inside it.
+                let source = source;
+                let (ns, prop) = decode_control_id(control_id);
+                let (amp, cam) = control_interfaces(&source.0);
+                let r = match ns {
+                    NS_PROC_AMP => amp
+                        .as_ref()
+                        .ok_or_else(|| HalError::InvalidParameter(
+                            "this camera exposes no IAMVideoProcAmp interface".into()))?
+                        .Set(prop, v, VideoProcAmp_Flags_Manual.0),
+                    NS_CAMERA_CONTROL => cam
+                        .as_ref()
+                        .ok_or_else(|| HalError::InvalidParameter(
+                            "this camera exposes no IAMCameraControl interface".into()))?
+                        .Set(prop, v, CameraControl_Flags_Manual.0),
+                    other => return Err(HalError::InvalidParameter(format!(
+                        "control id {control_id:#x} names namespace {other}, which does not exist"))),
+                };
+                r.map_err(|e| HalError::Io(format!("control set ({control_id:#x}={v}): {e}")))?;
+                Ok::<_, HalError>(())
+            })
+            .await
+            .map_err(|e| HalError::Io(format!("spawn_blocking join error: {e:?}")))?
         }
     }
 

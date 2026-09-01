@@ -102,6 +102,100 @@ mod tests {
         );
     }
 
+    /// Windows camera controls must report real ranges and actually take
+    /// effect — the gap opened on 2026-08-31 and closed here.
+    ///
+    /// This asserts **state**, not that calls returned `Ok`: the ranges have to
+    /// be internally consistent, and a value written has to read back changed.
+    /// A backend that accepted every `set_control` and ignored it would pass a
+    /// mere `is_ok()` check and fail this one.
+    ///
+    /// Hardware-gated: needs a camera Windows can see.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn wmf_controls_report_real_ranges_and_take_effect() {
+        if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
+            eprintln!("skipping wmf_controls_report_real_ranges_and_take_effect (set IRIS_USE_HW=1)");
+            return;
+        }
+        use crate::backend::UvcBackend as _;
+        let backend = crate::backend::new_wmf_backend().expect("WmfBackend::new() failed");
+        let devs = backend.enumerate_devices().await.expect("enumerate failed");
+        assert!(!devs.is_empty(), "no camera found");
+        let id = &devs[0].id;
+        backend.open_device(id).await.expect("open failed");
+
+        let controls = backend.list_controls(id).await.expect("list_controls failed");
+        eprintln!("WMF exposed {} control(s):", controls.len());
+        for c in &controls {
+            eprintln!(
+                "  id={:#06x} {:<24} min={:<6} max={:<6} step={:<4} default={}",
+                c.id, c.name, c.min, c.max, c.step, c.default
+            );
+        }
+        assert!(
+            !controls.is_empty(),
+            "list_controls returned nothing; Windows camera controls are still unimplemented"
+        );
+
+        // Ranges must be internally consistent. A backend inventing values
+        // rather than reading the driver tends to fail this.
+        for c in &controls {
+            assert!(c.min < c.max, "{}: min {} not below max {}", c.name, c.min, c.max);
+            assert!(c.step > 0, "{}: step {} must be positive", c.name, c.step);
+            assert!(
+                c.default >= c.min && c.default <= c.max,
+                "{}: default {} outside [{}, {}]",
+                c.name, c.default, c.min, c.max
+            );
+        }
+
+        // Every control must be readable, and the value must sit in its range.
+        for c in &controls {
+            let v = backend
+                .get_control(id, c.id)
+                .await
+                .unwrap_or_else(|e| panic!("get_control({}) failed: {e:?}", c.name));
+            assert!(
+                v >= c.min && v <= c.max,
+                "{}: current {} outside its own reported range [{}, {}]",
+                c.name, v, c.min, c.max
+            );
+        }
+
+        // Now prove a write takes effect. Pick the first control with room to
+        // move, write a value that is definitely not the current one, and read
+        // it back.
+        let target = controls
+            .iter()
+            .find(|c| c.max - c.min >= c.step * 2)
+            .expect("no control with a usable range");
+        let before = backend.get_control(id, target.id).await.expect("get before");
+        let want = if before + target.step <= target.max {
+            before + target.step
+        } else {
+            before - target.step
+        };
+        backend
+            .set_control(id, target.id, want)
+            .await
+            .unwrap_or_else(|e| panic!("set_control({} -> {want}) failed: {e:?}", target.name));
+        let after = backend.get_control(id, target.id).await.expect("get after");
+        eprintln!(
+            "  set {} {} -> {}, read back {}",
+            target.name, before, want, after
+        );
+        assert_ne!(
+            after, before,
+            "{} did not change: set_control was accepted but had no effect",
+            target.name
+        );
+
+        // Put it back so the camera is left as found.
+        let _ = backend.set_control(id, target.id, before).await;
+        backend.close_device(id).await.expect("close failed");
+    }
+
     /// Hardware-gated WMF CAPTURE test — IRIS_USE_HW=1 + a real webcam.
     /// Proves the full deep-backend path: enumerate → open → read frames.
     #[cfg(windows)]
