@@ -10,6 +10,10 @@ case "$1" in
         echo "baxters-iris: run.sh missing or not executable — the desktop entry execs it" >&2
         exit 1; }
     [ -x /usr/bin/update-desktop-database ] && update-desktop-database -q /usr/share/applications || true
+    # Refresh the icon cache, or the shell keeps showing a blank tile until
+    # something else happens to rebuild it.
+    [ -x /usr/bin/gtk-update-icon-cache ] \
+        && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
     echo "baxters-iris: installed. Config: ~/.config/iris/iris.toml (optional)."
     ;;
 esac

@@ -132,8 +132,16 @@ async fn main() {
             // and the app does not appear in _NET_CLIENT_LIST), so pinning it
             // is what makes the match true by construction instead of by
             // assumption.
+            let mut viewport = egui::ViewportBuilder::default().with_app_id("baxters-iris");
+            match load_window_icon() {
+                Ok(icon) => viewport = viewport.with_icon(icon),
+                // Not fatal. A window with the default icon is a cosmetic
+                // problem; refusing to start over it is not a trade worth
+                // making, and the reason is printed so it is not a mystery.
+                Err(e) => eprintln!("window icon unavailable: {e}"),
+            }
             let options = eframe::NativeOptions {
-                viewport: egui::ViewportBuilder::default().with_app_id("baxters-iris"),
+                viewport,
                 ..Default::default()
             };
             // `run_native`'s error was discarded here. If the window could not
@@ -174,4 +182,33 @@ async fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Decode the embedded application icon into the RGBA form eframe wants.
+///
+/// The PNG is compiled in rather than read from disk: an installed binary and
+/// a `cargo run` from the source tree have different working directories and
+/// different install layouts, and an icon that silently fails to load in one of
+/// them is exactly the kind of thing nobody notices until a screenshot.
+fn load_window_icon() -> Result<egui::IconData, String> {
+    const ICON_PNG: &[u8] = include_bytes!("assets/icon.png");
+
+    let decoder = png::Decoder::new(ICON_PNG);
+    let mut reader = decoder.read_info().map_err(|e| format!("png header: {e}"))?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).map_err(|e| format!("png data: {e}"))?;
+
+    if info.color_type != png::ColorType::Rgba {
+        return Err(format!(
+            "icon must be RGBA, got {:?} — regenerate with packaging/generate_icon.py",
+            info.color_type
+        ));
+    }
+    buf.truncate(info.buffer_size());
+
+    Ok(egui::IconData {
+        rgba: buf,
+        width: info.width,
+        height: info.height,
+    })
 }

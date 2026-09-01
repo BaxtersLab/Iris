@@ -1,6 +1,36 @@
 Dependencies and native build notes
 
-This project requires a few native development dependencies for some crates (for example, `bsr-ui` links to FFmpeg via `ffmpeg-sys-next`). Below are recommended installation options for Windows (PowerShell commands).
+## Corrected 2026-09-01 — read this before the Windows section below
+
+**Iris does not link FFmpeg.** The opening line of this file said it did, via
+`ffmpeg-sys-next`, and named `bsr-ui` — a crate from a *different* project that
+has never been part of this workspace. Neither `ffmpeg-sys-next` nor any FFmpeg
+binding appears in `Cargo.lock`.
+
+FFmpeg is a **test-time** dependency on Linux only, and only as the `ffmpeg`
+**CLI**, which `iris-harness` shells out to. That is documented correctly at the
+bottom of this file and in `README.md`. The Windows vcpkg instructions below are
+retained because they may still be useful for a `LIBCLANG_PATH`/MSVC setup, but
+**they are not required to build Iris**.
+
+## Rust dependencies worth knowing about
+
+All pure Rust — no system libraries, no bindgen — which is deliberate:
+
+| crate | used by | why |
+|---|---|---|
+| `zune-jpeg` | `iris-capture` | decodes MJPEG frames from UVC cameras. **Reports success on a truncated JPEG**, so `decode_to_rgb24` checks for an EOI marker itself |
+| `png` | `iris-ui` | decodes the embedded window icon at startup. The alternative was committing raw RGBA, which nobody can open or review |
+| `libc` | `iris-hal`, `iris-ui` | V4L2 ioctls, and `flock` for the single-instance guard |
+| `eframe` / `egui` | `iris-ui` | the window. Renders through EGL/OpenGL, **not Vulkan** |
+
+Runtime shared libraries for the `.deb` are derived from a running process
+rather than from `ldd` — see `packaging/DEBIAN/control`.
+
+---
+
+Below: the original Windows notes, retained as written.
+
 
 Option A — vcpkg (recommended on Windows)
 

@@ -64,7 +64,17 @@ ICON=$(sed -n 's/^Icon=//p' "$DESKTOP")
 case "$ICON" in
     /*) [ -f "$STAGE$ICON" ] || { echo "FATAL: Icon=$ICON not in payload" >&2; exit 1; } ;;
     "") echo "FATAL: desktop entry has no Icon=" >&2; exit 1 ;;
-    *)  : ;;   # a named icon, resolved from the theme
+    *)
+        # A NAMED icon still has to be installed, or the launcher shows a blank
+        # tile with no error anywhere. This branch used to be `:` — a check that
+        # passed by not looking, which is the shape of guard this build script
+        # exists to avoid.
+        icon_count=$(find "$STAGE/usr/share/icons/hicolor" -name "$ICON.png" 2>/dev/null | wc -l)
+        [ "$icon_count" -gt 0 ] || {
+            echo "FATAL: Icon=$ICON is a theme name but no hicolor/*/apps/$ICON.png is in the payload" >&2
+            exit 1; }
+        echo "  icon: $icon_count size(s) of $ICON in hicolor"
+        ;;
 esac
 
 [ -f "$STAGE/usr/share/doc/$PKG/copyright" ] || {

@@ -5,6 +5,8 @@ case "$1" in
     rm -rf /opt/baxters/iris
     rmdir /opt/baxters 2>/dev/null || true
     [ -x /usr/bin/update-desktop-database ] && update-desktop-database -q /usr/share/applications || true
+    [ -x /usr/bin/gtk-update-icon-cache ] \
+        && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
     ;;
 esac
 exit 0
