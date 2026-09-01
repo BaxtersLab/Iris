@@ -4,6 +4,20 @@ All notable changes in this workspace since the previous local snapshot.
 
 Unreleased
 ----------
+iris-control built — 2026-08-31
+- The crate that was six lines and a lie (`apply_profile(_) -> true`) is now
+  real: `control` (portable control names, capability validation),
+  `profile` (named JSON profiles), `service` (one serialising owner of the
+  camera's control surface, emitting the four control/profile telemetry events
+  that already existed for it). 30 tests, three falsified.
+- Profiles are keyed by control **name**, never by platform id — V4L2 and
+  Windows number controls differently and the sets are not in bijection.
+- Validation is range **and** step, with `clamp_value` separate so rounding is
+  never silent.
+- Automation is derived from the device: UVC exposes it as a companion control,
+  toggled where boolean and **refused with a reason where it is a menu**
+  (`auto_exposure` has four modes; neither min nor max means "on").
+
 Windows parity — 2026-08-31 (round 2 returned)
 - **Windows camera controls implemented** against `IAMVideoProcAmp` and
   `IAMCameraControl`: 10 controls on the reference camera with the driver's own

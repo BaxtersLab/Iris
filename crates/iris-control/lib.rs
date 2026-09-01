@@ -1,28 +1,30 @@
 // SPDX-License-Identifier: MIT
 // Iris — iris-control
 
-//! Camera control abstraction — **not yet implemented**.
+//! Camera control: a portable vocabulary, saved profiles, and one owner of the
+//! camera's control surface.
 //!
-//! This crate is a declared placeholder. Its specification (instruction block
-//! F-1) calls for `control`, `profile` and `service` modules managing exposure,
-//! gain, focus, zoom and white balance through `iris-hal`, plus named profiles
-//! and a `ControlService`. None of that exists yet, and the gap is declared in
-//! `ROADMAP.md`.
+//! Built on `iris-hal`, which implements controls on **both** platforms —
+//! V4L2's `G_CTRL`/`S_CTRL`/`QUERYCTRL` on Linux, `IAMVideoProcAmp` and
+//! `IAMCameraControl` on Windows. This crate adds what sits above that: names
+//! instead of platform-defined ids, validation against the device's own
+//! reported range and step, profiles that survive moving between platforms,
+//! and a single serialising owner so two callers cannot race each other's
+//! writes.
 //!
-//! **It deliberately exposes no API.** Until 2026-08-31 it exported
-//!
-//! ```ignore
-//! pub fn apply_profile(_: &str) -> bool { true }
-//! ```
-//!
-//! which ignored the profile it was given and reported success for work it had
-//! not done — a mock in delivered product code, which Article VII forbids, and
-//! the worst shape of one: a caller could not tell it had failed. Nothing ever
-//! called it. An empty crate is honest; a function that always returns `true`
-//! is not.
-//!
-//! The underlying capability does partly exist one layer down:
-//! `iris_hal::backend`'s V4L2 implementation has working `get_control`,
-//! `set_control` and `list_controls` (11 controls enumerated on the reference
-//! camera). The WMF side does not — see `ROADMAP.md`. Whoever builds this crate
-//! should route through the HAL rather than re-derive it.
+//! Until 2026-08-31 this crate was six lines — `apply_profile(_) -> true`, a
+//! function that ignored its argument and reported success for work it had not
+//! done, while the README advertised the whole feature. That is why the
+//! validation here is explicit and why nothing guesses: the failure mode this
+//! code replaced was something that always claimed to work.
+
+pub mod control;
+pub mod profile;
+pub mod service;
+
+#[cfg(test)]
+mod tests;
+
+pub use control::{AutoSupport, CameraControl, ControlCapability};
+pub use profile::{CameraProfile, ProfileStore};
+pub use service::{ControlCommand, ControlHandle, ControlService};

@@ -127,19 +127,50 @@ shipped product code (Article VII §2–3). The fake APIs are gone, the README i
 corrected, and the gaps are declared below. Found by asking which crates
 contribute **zero tests** — a question a green workspace total cannot answer.
 
-- [ ] STUB: `iris-control` — camera-control abstraction. Specification
-      (instruction block F-1) calls for `control`, `profile` and `service`
-      modules covering exposure, gain, focus, zoom and white balance through
-      `iris-hal`, plus named profiles and a `ControlService`.
-      **Until 2026-08-31 it exported `apply_profile(_: &str) -> bool { true }`**
-      — it ignored the profile and reported success for work it had not done,
-      which a caller could not distinguish from the real thing. Nothing ever
-      called it. The function was removed rather than left: an empty crate is
-      honest, a function that always returns `true` is not.
-      **Partly available one layer down:** `iris-hal`'s V4L2 backend implements
-      `get_control`/`set_control`/`list_controls` (11 controls on the reference
-      camera). Build this on the HAL rather than re-deriving it — and note the
-      WMF side of those is itself unimplemented, above.
+- [x] **DONE 2026-08-31** — ~~STUB: `iris-control`~~. Built on the HAL's control
+      surface, which now works on **both** platforms. Three modules as
+      specified: `control` (a portable name vocabulary + capability validation),
+      `profile` (named profiles as JSON), `service` (one serialising owner of
+      the camera's controls, emitting the `ControlChanged`/`ControlAutoToggled`/
+      `ProfileLoaded`/`ProfileSaved` telemetry events that already existed for
+      it). **30 tests**, including the service driven against a recording fake
+      backend; three falsified.
+
+      Design decisions worth keeping:
+
+      * **Profiles are keyed by control NAME, never by platform id.** V4L2 and
+        Windows number controls entirely differently and the sets are not in
+        bijection, so a profile carrying ids would stop applying the moment it
+        crossed platforms. A test asserts no `"id"` appears in the serialised
+        form.
+      * **Validation is range *and* step.** A driver reporting `step = 4` does
+        not accept 5; a set that silently rounds makes the caller's read-back
+        disagree with what it wrote. `clamp_value` exists separately so
+        rounding is always the caller's explicit choice.
+      * **A profile from another camera applies what it can** and reports the
+        count. Refusing a whole profile because one control is absent would make
+        profiles useless across devices, which is most of the point of naming
+        them.
+      * **Telemetry is emitted after the write succeeds, never before.** A
+        `ControlChanged` for a write the driver refused would be a claim that
+        something changed when nothing did.
+
+- [ ] GAP: **automation on menu-style companions is not toggled.** UVC exposes
+      automation as a separate control beside the one it governs, and
+      `iris-control` toggles it where it is boolean (`white_balance_automatic`,
+      `focus_automatic_continuous`). `auto_exposure` on V4L2 is a **menu** —
+      0 auto, 1 manual, 2 shutter priority, 3 aperture priority — where neither
+      min nor max means "on", so writing a guess would put a real camera into a
+      mode nobody asked for. Reported as `AutoSupport::NotToggleable` with the
+      reason, and settable directly by name. Making it toggleable needs a
+      per-driver menu-semantics map, which is a research task, not an oversight.
+
+- [ ] GAP: `iris-control` is **not yet wired into `iris-ui`**. The crate is
+      real, tested and usable, but nothing constructs a `ControlService` at
+      startup and no UI surfaces it — that is integration (block I-1), and it
+      needs UI design decisions about where controls live in the window. Until
+      then the controls are reachable from code and from the HAL, not from the
+      application.
 
 - [ ] STUB: `iris-stream` — multi-subscriber frame streaming. Specification
       (instruction block G-1) calls for `mode`, `subscriber`, `ring_buffer`,

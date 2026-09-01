@@ -13,10 +13,10 @@ Iris is a tool, not a brain.
 - iris-hrt: health, runtime, thermal monitoring
 - iris-hal: UVC hardware abstraction — WMF backend (Windows), V4L2 backend (Linux), mock
 - iris-capture: capture pipeline — CaptureService, UvcCaptureBackend adapter, DXGI screen backend (Windows)
-- iris-control: **not implemented** — a declared placeholder for camera-control
-  profiles. The underlying controls do work one layer down, in `iris-hal`'s V4L2
-  backend (`get_control`/`set_control`/`list_controls`); this crate exposes no
-  API. See `ROADMAP.md`
+- iris-control: camera controls by name, capability validation, named profiles,
+  and a serialising `ControlService`. Profiles are keyed by control **name**, so
+  one saved on Linux applies on Windows where the ids differ entirely.
+  **Not yet wired into the UI** — see `ROADMAP.md`
 - iris-stream: **not implemented** — a declared placeholder for multi-subscriber
   frame fan-out. Telemetry fan-out and the bounded frame queue already exist, in
   `iris-ipc` and `iris-capture` respectively; this crate exposes no API. See
