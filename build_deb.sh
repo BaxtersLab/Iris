@@ -43,6 +43,21 @@ mkdir -p "$DEST/target/release" "$STAGE/usr/share/applications"
 
 cp -a packaging/DEBIAN "$STAGE/DEBIAN"
 cp -a packaging/usr/. "$STAGE/usr/"
+
+# Stage the theme icons FROM the generator's output rather than from a second
+# committed copy of the same files.
+#
+# They were committed twice — packaging/icons/iris_NxN.png and
+# packaging/usr/share/icons/hicolor/NxN/apps/baxters-iris.png — byte-identical,
+# with nothing keeping them so. Regenerating the icon would have updated one set
+# and left the other, and the package ships the stale one.
+for icon in packaging/icons/iris_*x*.png; do
+    [ -e "$icon" ] || { echo "FATAL: no generated icons in packaging/icons/" >&2; exit 1; }
+    dim=$(basename "$icon" .png); dim=${dim#iris_}
+    dest="$STAGE/usr/share/icons/hicolor/$dim/apps"
+    mkdir -p "$dest"
+    cp -a "$icon" "$dest/baxters-iris.png"
+done
 cp -a "$BIN" "$DEST/target/release/iris-ui"
 
 # Required payload items. Asserted individually so a missing one names itself.
