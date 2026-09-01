@@ -172,16 +172,46 @@ contribute **zero tests** — a question a green workspace total cannot answer.
       then the controls are reachable from code and from the HAL, not from the
       application.
 
-- [ ] STUB: `iris-stream` — multi-subscriber frame streaming. Specification
-      (instruction block G-1) calls for `mode`, `subscriber`, `ring_buffer`,
-      `service` and `telemetry` modules with four output modes (Pull, Push,
-      SharedMemory, IPC). Until 2026-08-31 it exported
-      `stream_info() -> &'static str { "stream" }`, a literal nothing called.
-      **Scope is smaller than it looks:** `iris-ipc` already broadcasts
-      telemetry to multiple subscribers, and `iris-capture`'s `CaptureService`
-      already owns a bounded frame queue with an explicit drop policy. What is
-      genuinely missing is **frame** fan-out beyond one consumer, plus the
-      shared-memory and IPC transports.
+- [x] **DONE 2026-08-31** — ~~STUB: `iris-stream`~~. Built as four modules:
+      `mode`, `ring_buffer`, `subscriber`, `service`. **17 tests**, three
+      falsified. The scope was smaller than block G-1 implies, as predicted:
+      `iris-ipc` already fans telemetry out and `iris-capture` already owns a
+      bounded frame queue — the genuine gap was **frames reaching more than one
+      consumer** without the slowest dictating the rate.
+
+      * **`Push`**: one bounded channel per subscriber. A consumer that cannot
+        keep up drops **its own** frames and nothing else — attributing drops
+        per subscriber is the only way to know which one is slow. A dropped
+        `FrameSubscription` removes itself on the next delivery, so a consumer
+        that panicked cannot leak a subscription the service keeps feeding.
+      * **`Pull`**: a ring of recent frames read at the consumer's own pace.
+      * The block-G1 spec's `read_slot` documented "0 = oldest available" while
+        indexing `slots[index]` directly. Those agree only until the ring first
+        wraps; afterwards a caller asking for the oldest gets whatever sits in
+        slot zero. Implemented as `read_by_age`, and a test proves the spec's
+        version wrong across a wrap.
+
+- [ ] STUB: `StreamMode::SharedMemory` and `StreamMode::Ipc` — **declared, and
+      refused at runtime rather than silently substituted.** Both parse (so a
+      config naming one fails at the service with "not implemented" rather than
+      "no such mode" — different problems, only one of them a typo), but
+      `set_mode` returns an error and the service will not run in them.
+
+      A mode that quietly behaves like a different mode is precisely the
+      undeclared stub Article VII forbids, and is the failure this crate was
+      rewritten to remove.
+
+      **Note on naming:** `ring_buffer.rs` is *in-process and copies* — each
+      write clones the frame's bytes. Block G-1 called it a "shared-memory ring
+      buffer for zero-copy frame delivery", which it is not. Real shared memory
+      needs a mapped region and a cross-process protocol; that is what the
+      `SharedMemory` mode would be, and none of it exists.
+
+- [ ] GAP: `iris-stream` is **not yet wired into `iris-ui`**, the same as
+      `iris-control`. `iris.toml`'s `stream.default_mode` and
+      `stream.ring_buffer_capacity` are still read by nothing — a config knob
+      nothing parses, which this session fixed for `capture.*` and has not for
+      `stream.*`. Wiring both crates in is block I-1 and needs UI decisions.
 
 - [x] **DONE 2026-08-31** — ~~GAP: `iris-ipc-pipe-bridge` is not a Cargo
       workspace member~~. It carried an empty `[workspace]` table making it its

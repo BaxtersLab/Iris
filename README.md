@@ -17,10 +17,10 @@ Iris is a tool, not a brain.
   and a serialising `ControlService`. Profiles are keyed by control **name**, so
   one saved on Linux applies on Windows where the ids differ entirely.
   **Not yet wired into the UI** — see `ROADMAP.md`
-- iris-stream: **not implemented** — a declared placeholder for multi-subscriber
-  frame fan-out. Telemetry fan-out and the bounded frame queue already exist, in
-  `iris-ipc` and `iris-capture` respectively; this crate exposes no API. See
-  `ROADMAP.md`
+- iris-stream: frame fan-out to several consumers — `Push` (a bounded channel
+  per subscriber, so a slow one drops only its own frames) and `Pull` (a ring of
+  recent frames). `SharedMemory` and `Ipc` are named but **refused**, not
+  silently substituted. **Not yet wired into the UI** — see `ROADMAP.md`
 - iris-ui: the camera app (egui, charcoal theme) + bootstrap runtime
 - iris-harness: test-stream generator (ffmpeg MPEG-TS / deterministic JSONL)
 - iris-ipc-pipe-bridge (standalone): JSON-lines envelope bridge — named pipe

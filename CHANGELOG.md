@@ -4,6 +4,22 @@ All notable changes in this workspace since the previous local snapshot.
 
 Unreleased
 ----------
+iris-stream built — 2026-08-31
+- The second six-line crate (`stream_info() -> "stream"`) is now real: `Push`
+  gives each subscriber its own bounded channel, so a slow consumer drops only
+  its own frames and cannot set the pace for the others; `Pull` gives a ring of
+  recent frames read at the consumer's own pace. 17 tests, three falsified.
+- A dropped subscription removes itself, so a consumer that panicked cannot
+  leak a subscription the service keeps feeding.
+- `SharedMemory` and `Ipc` are **declared and refused**, never silently
+  substituted — and the ring buffer is documented as in-process and copying,
+  because the specification called it "shared-memory, zero-copy" and it is
+  neither.
+- The spec's `read_slot` indexed raw slots while documenting "0 = oldest";
+  those agree only until the ring wraps. Implemented as `read_by_age`, with a
+  test that fails against the spec's version.
+- **Every crate in the workspace now has tests.** Gate 145 -> 162 passed.
+
 iris-control built — 2026-08-31
 - The crate that was six lines and a lie (`apply_profile(_) -> true`) is now
   real: `control` (portable control names, capability validation),
