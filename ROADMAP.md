@@ -316,7 +316,55 @@ contribute **zero tests** — a question a green workspace total cannot answer.
       Falsified: restoring the index form fails `a_ragged_rgb_buffer_does_not_panic` with an
       out-of-bounds panic at that exact line.
 
-## Config surface — declared but not routed, opened and closed 2026-08-31
+## Config surface — declared but not routed, opened 2026-08-31, **REOPENED 2026-09-02**
+
+- [ ] **REOPENED — `capture.pixel_format`, `capture.width` and `capture.height` are
+      honoured by the MOCK backend only, and ignored by every real camera on both
+      platforms.** The 2026-08-31 item below is not wrong about what it fixed — it
+      routed the config into `CaptureConfig` — but its proof was measured against
+      the one backend that reads those fields, so the fix was never true for
+      hardware.
+
+      `UvcCaptureBackend::start` (`iris-capture/src/backend.rs:190-192`) overwrites
+      `config.width`, `config.height` and `config.format` with whatever the device
+      is already delivering. Underneath it, neither backend ever asks:
+
+      * **V4L2** (`v4l2_backend.rs::open_sync`) does `VIDIOC_G_FMT`, sets
+        `field = NONE`, and writes the **same struct** back with `VIDIOC_S_FMT`. It
+        adopts the driver's current mode; it never requests the configured one.
+      * **WMF** (`iris-hal/backend.rs`) never calls `SetCurrentMediaType` at all —
+        `grep` returns nothing — so it accepts MF's default type.
+
+      **Measured on Linux, 2026-09-02, no config file:**
+      ```
+      Capture config: 3840x2160 @30 fps format=nv12     <- what Iris asked for
+      UvcCaptureBackend: device mode 1920x1080 MJPEG    <- what it got
+      FrameCaptured { width: 1920, height: 1080 }
+      ```
+      Neither the resolution nor the format survived. Found on Windows in round 6
+      (§4.2) and confirmed identical here — it is estate-wide, not a Windows gap.
+
+      **Consequences.** `validate()` accepts `pixel_format = "yuy2"` (there is a
+      test for it) and the value is then discarded, so the config accepts a request
+      it cannot honour — Article VII: a declared knob that does nothing. The YUYV
+      decode arm added 2026-09-01 is consequently **unreachable at runtime** on
+      Windows, correct and dead, until a camera turns up whose *default* mode is
+      YUY2 — at which point it silently becomes load-bearing. And every resolution
+      `probe_capabilities` enumerates is unselectable.
+
+      **Fixing it is a feature, not a repair:** format negotiation needs a
+      requested-mode search, a defined fallback when the device refuses, and
+      `current_width`/`current_height` kept in step with the result. Declared here
+      rather than guessed at. **Operator decision.**
+
+- [ ] **REOPENED — the closure method, not just the item.** The 2026-08-31 proof
+      cites `size_bytes` of `460800` (640x480x1.5, NV12) and `614400` (x2, YUY2).
+      Those are exactly `CaptureFrame::expected_size(config.width, config.height,
+      config.format)` — the synthetic backend's own arithmetic. **A config knob
+      verified against the mock proves only that the mock reads it.** Any future
+      config-routing claim must be measured against a real device, or say plainly
+      that it was not.
+
 
 - [x] **DONE 2026-08-31** — `capture.pixel_format` and `capture.drop_policy` were dead strings.
       `bootstrap.rs` hardcoded `PixelFormat::Bgr24` and `DropPolicy::Oldest` while both fields sat
@@ -371,6 +419,53 @@ telemetry ring in `bootstrap.rs` combined with a slow receiver — **not implica
 `loop { rx.try_recv() }` drain, which converts every queued frame and discards all but the last —
 **real, and worse than suspected**: it was a UI-thread livelock, fixed 2026-08-31 above.
 
+## Windows (WMF) — round 6 findings, opened 2026-09-02
+
+Measured on the Windows box with temporary instrumentation that was removed and
+verified removed (`diff -rq` clean, no patch returned).
+
+- [ ] **All 8 MJPG native modes are silently dropped.** `subtype_to_pixel_format`
+      (`iris-hal/backend.rs:180`) maps NV12, YUY2, RGB24 and RGB32 and has no case
+      for `MF_VIDEO_FORMAT_MJPG` (`47504A4D-...`), so `media_type_to_format`
+      returns `None` and `probe_capabilities` discards the mode. **The camera
+      offers 17 native modes and Iris lists 9.**
+
+      **This is the same defect that was fixed on Linux on 2026-08-01**, one
+      platform across — an unmapped fourcc making modes vanish from enumeration
+      rather than failing loudly. See the MJPEG notes below, which cite "its full
+      9 modes on Windows" as the reference for what the camera can do. That
+      baseline was itself under-reported, and this line corrects it.
+
+      Harmless in practice today: MF decodes MJPEG transparently and hands back
+      NV12, so nothing is lost at capture. Worth a **deliberate** decision — map
+      it, or leave a comment saying why it is intentionally unmapped.
+
+- [ ] **Frame geometry is cached at open and never re-read.** `UvcCaptureBackend`
+      records width/height/format once in `start()`. Nothing today changes the
+      media type after open, so nothing is broken — but the day something does,
+      every downstream consumer works from stale dimensions. Proven accidentally
+      in round 6: a first forcing attempt left Iris holding 1920x1080 NV12
+      geometry while the reader delivered 640x480 YUY2, and `/frame` answered
+      `500 frame buffer is 614400 bytes, expected at least 3110400`. **The
+      `Truncated` guard added 2026-09-01 caught it** rather than shearing garbage
+      into a valid-looking JPEG — the guard doing exactly its job, tested by
+      accident against a real mismatch.
+
+- [x] **The padded-stride worry is retired (2026-09-02).** `MF_MT_DEFAULT_STRIDE`
+      was read from all 17 native modes. It is **absent** on all 8 NV12 and all 8
+      MJPG types, and `1280` on the single YUY2 type — which is `640 * 2`, i.e.
+      unpadded. The negotiated NV12 buffer is 3 110 400 bytes, exactly
+      `1920*1080*3/2`, so there is no padding to accommodate. No negative stride
+      anywhere. `snapshot.rs:140` and `ui_app.rs:191` were correctly left alone.
+
+- [ ] **If stride checking is ever added, `stride == width` is the wrong test.**
+      `MF_MT_DEFAULT_STRIDE` is in **bytes**; `MF_MT_FRAME_SIZE` width is in
+      **pixels**. They are only comparable for one-byte-per-sample formats — true
+      of NV12's luma plane, false for YUY2. The correct comparison is
+      `stride == width * bytes_per_sample`, or better the buffer-length check,
+      which needs no per-format knowledge. The round-6 probe hit this and caught
+      it before reporting a phantom defect in the one format that round was about.
+
 ## Notes on MJPEG support (added 2026-08-01)
 
 `PixelFormat::Mjpeg` was added so V4L2 enumeration reports what the hardware actually offers.
@@ -379,6 +474,11 @@ meant unmapped formats were skipped by the `VIDIOC_ENUM_FMT` loop entirely. On U
 nearly every mode above ~640x480 is MJPEG-only, because uncompressed 1080p exceeds USB 2.0
 bandwidth — so a 1080p-capable camera enumerated as **640x480-only** on Linux while reporting its
 full 9 modes on Windows (Media Foundation decodes MJPEG transparently and reports NV12).
+
+**Correction, 2026-09-02:** those "9 modes on Windows" were themselves under-reported. The camera
+offers **17** native modes; Windows drops all 8 MJPG types for the identical reason Linux was
+dropping modes here — an unmapped fourcc. The Windows figure was never the full picture and should
+not be used as the reference for what a camera can do. See the round-6 section above.
 
 Enumerating the modes is therefore correct and necessary. **As of 2026-08-17 (`c8b6f85`) both
 decode stubs are filled, so selecting an MJPEG mode is now useful end to end** — verified against
