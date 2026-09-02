@@ -102,6 +102,16 @@ pub mod v4l2 {
     pub const VIDIOC_DQBUF: libc::c_ulong = 0xc058_5611; // _IOWR('V', 17, v4l2_buffer[88])
     pub const VIDIOC_STREAMON: libc::c_ulong = 0x4004_5612; // _IOW('V', 18, int)
     pub const VIDIOC_STREAMOFF: libc::c_ulong = 0x4004_5613; // _IOW('V', 19, int)
+    // Frame rate is a **separate ioctl from format**. `S_FMT` carries width,
+    // height and fourcc; the interval lives in `v4l2_streamparm` and is set with
+    // `S_PARM`. That is why `capture.target_fps` survived two rounds of format
+    // negotiation still being honoured by the mock backend alone — it was never
+    // in the struct that was being fixed.
+    pub const VIDIOC_G_PARM: libc::c_ulong = 0xc0cc_5615; // _IOWR('V', 21, v4l2_streamparm[204])
+    pub const VIDIOC_S_PARM: libc::c_ulong = 0xc0cc_5616; // _IOWR('V', 22, v4l2_streamparm[204])
+    /// `v4l2_captureparm.capability`: the driver honours `timeperframe` at all.
+    /// Without it, setting an interval is silently meaningless.
+    pub const V4L2_CAP_TIMEPERFRAME: u32 = 0x1000;
     pub const VIDIOC_G_CTRL: libc::c_ulong = 0xc008_561b; // _IOWR('V', 27, v4l2_control[8])
     pub const VIDIOC_S_CTRL: libc::c_ulong = 0xc008_561c; // _IOWR('V', 28, v4l2_control[8])
     pub const VIDIOC_QUERYCTRL: libc::c_ulong = 0xc044_5624; // _IOWR('V', 36, v4l2_queryctrl[68])
@@ -144,6 +154,36 @@ pub mod v4l2 {
 
     /// `type` + 4 bytes of padding (the union is 8-aligned because some of its
     /// members contain pointers) + a 200-byte union = 208 bytes.
+    #[repr(C)]
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub(crate) struct V4l2Fract {
+        pub(crate) numerator: u32,
+        pub(crate) denominator: u32,
+    }
+
+    /// 40 bytes: two u32, an 8-byte fraction, two u32, and 4 reserved u32.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub(crate) struct V4l2CaptureParm {
+        pub(crate) capability: u32,
+        capturemode: u32,
+        pub(crate) timeperframe: V4l2Fract,
+        extendedmode: u32,
+        readbuffers: u32,
+        reserved: [u32; 4],
+    }
+
+    /// `__u32 type` + a 200-byte union = 204 bytes, the same shape as
+    /// `v4l2_format`. Pinned by a size assertion in the tests, because getting
+    /// it wrong makes the ioctl number wrong and the call fails with EINVAL in
+    /// a way that looks like "the driver refused".
+    #[repr(C)]
+    pub(crate) struct V4l2StreamParm {
+        typ: u32,
+        pub(crate) parm: V4l2CaptureParm,
+        _union_tail: [u8; 200 - std::mem::size_of::<V4l2CaptureParm>()],
+    }
+
     #[repr(C)]
     pub(crate) struct V4l2Format {
         typ: u32,
@@ -323,6 +363,40 @@ pub mod v4l2 {
         30
     }
 
+    /// Every discrete interval a mode advertises, as whole frames per second.
+    ///
+    /// `first_fps` returns only index 0, which is all telemetry needed while
+    /// nothing could request a rate. Choosing one means knowing what is on
+    /// offer, and it is also what tells a test whether a *transition* between
+    /// two rates is even possible on the attached hardware.
+    pub(crate) fn advertised_fps(fd: libc::c_int, fourcc: u32, width: u32, height: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        for index in 0..64 {
+            let mut ival: V4l2FrmIvalEnum = unsafe { std::mem::zeroed() };
+            ival.index = index;
+            ival.pixel_format = fourcc;
+            ival.width = width;
+            ival.height = height;
+            if unsafe { xioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &mut ival as *mut _ as *mut _) } == -1
+            {
+                break;
+            }
+            if ival.typ != V4L2_FRMIVAL_TYPE_DISCRETE {
+                // Stepwise or continuous ranges are a different shape and this
+                // camera class does not use them; enumerating them as discrete
+                // values would be a lie.
+                break;
+            }
+            if let Some(fps) = V4l2UvcBackend::fps_from_interval(&V4l2Fract {
+                numerator: ival.union_data[0],
+                denominator: ival.union_data[1],
+            }) {
+                out.push(fps);
+            }
+        }
+        out
+    }
+
     /// How long `read_frame` waits for the driver to fill a buffer. Generous
     /// enough for a UVC camera's first frame after STREAMON, which can lag.
     const FRAME_TIMEOUT_MS: libc::c_int = 2000;
@@ -388,6 +462,92 @@ pub mod v4l2 {
             fmt.pix.width = req.width;
             fmt.pix.height = req.height;
             fmt.pix.pixelformat = pixel_format_to_fourcc(&req.pixel_format);
+        }
+
+        /// Convert a `timeperframe` fraction to whole frames per second.
+        ///
+        /// Rounded, not truncated: NTSC-derived cameras report `1001/30000`,
+        /// which is 29.97fps and must read as **30**, not 29. Truncation there
+        /// would make a correctly-granted request look like a mismatch and emit
+        /// a warning on every launch.
+        pub(crate) fn fps_from_interval(tpf: &V4l2Fract) -> Option<u32> {
+            if tpf.numerator == 0 || tpf.denominator == 0 {
+                return None;
+            }
+            Some((tpf.denominator + tpf.numerator / 2) / tpf.numerator)
+        }
+
+        /// Read the interval the device is **actually** running at.
+        ///
+        /// Authoritative, unlike `first_fps`, which enumerates the *advertised*
+        /// intervals for a mode and returns the first — a reasonable guess when
+        /// nothing has been set and simply wrong once something has.
+        fn active_fps(fd: libc::c_int) -> Option<u32> {
+            let mut parm: V4l2StreamParm = unsafe { std::mem::zeroed() };
+            parm.typ = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            if unsafe { xioctl(fd, VIDIOC_G_PARM, &mut parm as *mut _ as *mut _) } == -1 {
+                return None;
+            }
+            Self::fps_from_interval(&parm.parm.timeperframe)
+        }
+
+        /// Ask the driver for `want` frames per second; return what it granted.
+        ///
+        /// Like `S_FMT`, `S_PARM` **negotiates**: the driver clamps to an
+        /// interval it supports and still reports success, so the granted value
+        /// is read back rather than assumed.
+        ///
+        /// Returns `None` when nothing was asked, when the driver does not
+        /// advertise `V4L2_CAP_TIMEPERFRAME`, or when the call failed — in every
+        /// one of those cases the device keeps the interval it already had, so a
+        /// frame-rate request can never leave a working camera worse off.
+        fn negotiate_fps(
+            fd: libc::c_int,
+            want: u32,
+            fourcc: u32,
+            width: u32,
+            height: u32,
+        ) -> Option<u32> {
+            if want == 0 {
+                return None;
+            }
+            // Say what the mode offers when the request is not among them.
+            // "15fps was refused" is much less useful than "15fps was refused,
+            // this mode offers 30" — the same name-both-sides principle the
+            // format mismatch follows.
+            let offered = advertised_fps(fd, fourcc, width, height);
+            if !offered.is_empty() && !offered.contains(&want) {
+                tracing::warn!(
+                    "frame rate: {want}fps is not advertised for this mode (offered: {offered:?}); \
+                     asking anyway and reporting what the driver grants"
+                );
+            }
+            let mut parm: V4l2StreamParm = unsafe { std::mem::zeroed() };
+            parm.typ = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            if unsafe { xioctl(fd, VIDIOC_G_PARM, &mut parm as *mut _ as *mut _) } == -1 {
+                tracing::warn!("frame rate: VIDIOC_G_PARM failed; leaving the interval alone");
+                return None;
+            }
+            if parm.parm.capability & V4L2_CAP_TIMEPERFRAME == 0 {
+                tracing::warn!(
+                    "frame rate: this driver does not advertise V4L2_CAP_TIMEPERFRAME, \
+                     so {want}fps cannot be requested; leaving the interval alone"
+                );
+                return None;
+            }
+            parm.parm.timeperframe = V4l2Fract {
+                numerator: 1,
+                denominator: want,
+            };
+            if unsafe { xioctl(fd, VIDIOC_S_PARM, &mut parm as *mut _ as *mut _) } == -1 {
+                tracing::warn!(
+                    "frame rate: VIDIOC_S_PARM rejected {want}fps ({}); leaving the interval alone",
+                    std::io::Error::last_os_error()
+                );
+                return None;
+            }
+            // S_PARM rewrites the struct in place with the granted interval.
+            Self::fps_from_interval(&parm.parm.timeperframe)
         }
 
         /// Open the node, negotiate a format, map buffers, start streaming.
@@ -460,24 +620,51 @@ pub mod v4l2 {
                     granted.pixelformat
                 ))
             })?;
+            // Frame rate is negotiated separately, after the format: the
+            // interval a driver supports depends on the mode it is now in, so
+            // asking before `S_FMT` would be asking about the old one.
+            if let Some(req) = requested {
+                Self::negotiate_fps(
+                    raw,
+                    req.fps,
+                    granted.pixelformat,
+                    granted.width,
+                    granted.height,
+                );
+            }
+
+            // Report the interval the device is ACTUALLY running at, falling
+            // back to the first advertised one only when the driver will not
+            // say. `first_fps` enumerates what a mode *offers* and returns the
+            // first — a reasonable guess before anything is set, and wrong
+            // afterwards. Telemetry must describe the stream being delivered.
+            let active = Self::active_fps(raw)
+                .unwrap_or_else(|| first_fps(raw, granted.pixelformat, granted.width, granted.height));
+
             // Say so when the driver did not grant what was asked. Silence here
             // is indistinguishable from success, and a clamped mode is exactly
             // the case a caller most needs to know about.
             if let Some(req) = requested {
-                match req.describe_mismatch(granted.width, granted.height, &pixel_format) {
+                match req.describe_mismatch(
+                    granted.width,
+                    granted.height,
+                    &pixel_format,
+                    Some(active),
+                ) {
                     Some(diff) => tracing::warn!("format negotiation: {diff}"),
                     None => tracing::info!(
-                        "format negotiation: granted {}x{} {} as requested",
+                        "format negotiation: granted {}x{} {} @{}fps as requested",
                         granted.width,
                         granted.height,
-                        pixel_format
+                        pixel_format,
+                        active
                     ),
                 }
             }
             let format = FormatDescriptor {
                 width: granted.width,
                 height: granted.height,
-                fps: first_fps(raw, granted.pixelformat, granted.width, granted.height),
+                fps: active,
                 pixel_format,
             };
 
@@ -845,6 +1032,30 @@ pub mod v4l2 {
     impl Default for V4l2UvcBackend {
         fn default() -> Self {
             Self::new()
+        }
+    }
+
+    impl V4l2UvcBackend {
+        /// Every discrete frame rate a mode advertises, in the order the driver
+        /// lists them.
+        ///
+        /// Uses a **transient fd**, like `list_controls`, so it can be asked
+        /// while capture holds the device — enumeration is read-only and must
+        /// not contend for the streaming handle.
+        pub async fn advertised_frame_rates(
+            &self,
+            id: &DeviceId,
+            mode: &FormatDescriptor,
+        ) -> HalResult<Vec<u32>> {
+            let id = id.clone();
+            let fourcc = pixel_format_to_fourcc(&mode.pixel_format);
+            let (w, h) = (mode.width, mode.height);
+            tokio::task::spawn_blocking(move || {
+                let fd = open_node(&id.0).ok_or(HalError::DeviceNotFound)?;
+                Ok(advertised_fps(fd.as_raw_fd(), fourcc, w, h))
+            })
+            .await
+            .map_err(|e| HalError::Io(format!("spawn_blocking join error: {e:?}")))?
         }
     }
 

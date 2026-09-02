@@ -183,6 +183,13 @@ impl<U: iris_hal::backend::UvcBackend> CaptureBackend for UvcCaptureBackend<U> {
             width: self.config.width,
             height: self.config.height,
             pixel_format: self.config.format.clone(),
+            // `capture.target_fps`. This field reached nothing but the mock
+            // backend's own sleep until 2026-09-02 — the third config knob in
+            // this struct to be validated, passed down, and ignored by every
+            // real backend, because frame rate is negotiated by a different
+            // mechanism from the pixel mode and was never in the struct the
+            // earlier fixes touched.
+            fps: self.config.target_fps,
         };
         tracing::info!("UvcCaptureBackend: opening {} ({})", chosen.name, chosen.id);
         self.uvc
@@ -206,24 +213,23 @@ impl<U: iris_hal::backend::UvcBackend> CaptureBackend for UvcCaptureBackend<U> {
                 // for, and on Windows nothing is asked for at all yet. Either
                 // way the operator configured one thing and is getting another,
                 // which is worth one line rather than none.
-                if actual.width != requested.width
-                    || actual.height != requested.height
-                    || actual.pixel_format != requested.pixel_format
-                {
-                    tracing::warn!(
-                        "capture config asked for {}x{} {} but the device is delivering \
-                         {}x{} {}; telemetry follows the device",
-                        requested.width,
-                        requested.height,
-                        requested.pixel_format,
-                        actual.width,
-                        actual.height,
-                        actual.pixel_format
-                    );
+                if let Some(diff) = requested.describe_mismatch(
+                    actual.width,
+                    actual.height,
+                    &actual.pixel_format,
+                    Some(actual.fps),
+                ) {
+                    tracing::warn!("capture config: {diff}; telemetry follows the device");
                 }
                 self.config.width = actual.width;
                 self.config.height = actual.height;
                 self.config.format = actual.pixel_format;
+                // Adopt the delivered rate too, for the same reason as the
+                // geometry: telemetry and any consumer computing a frame budget
+                // must see what the device is doing, not what was asked for.
+                if actual.fps > 0 {
+                    self.config.target_fps = actual.fps;
+                }
             }
         }
         self.device = Some(chosen.id);

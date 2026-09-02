@@ -13,6 +13,39 @@ the upgrade, so a published build would never reach anyone who already had one.
 `build_deb.sh` now refuses to build when the package version and the `iris-ui`
 crate version disagree.
 
+0.2.5 — 2026-09-02
+------------------
+The third decorative knob: `capture.target_fps` is negotiated on Linux
+- **`capture.target_fps` reached nothing but the mock backend's own sleep.** It
+  survived two rounds of format negotiation for a structural reason: on Linux the
+  frame interval is a **different ioctl** (`VIDIOC_S_PARM`) from the pixel mode
+  (`S_FMT`), so it was never in the struct being fixed. `pixel_format` was the
+  first knob of this shape, `width`/`height` the second.
+- **`negotiate_fps` asks, after the format is set** — the intervals a driver
+  offers depend on the mode it is now in — and reports what was granted. It falls
+  back to the existing interval when the driver does not advertise
+  `V4L2_CAP_TIMEPERFRAME` or refuses the call, so a rate request can never leave
+  a working camera worse off.
+- **When a rate is not on offer, the warning says what is**: `15fps is not
+  advertised for this mode (offered: [30])`. The same name-both-sides principle
+  the format mismatch already followed.
+- **`current_format` reports the ACTIVE rate**, read back with `G_PARM`, rather
+  than `first_fps` — which enumerated what a mode *offers* and returned the
+  first. A fair guess before anything was set, and wrong afterwards.
+- `fps_from_interval` **rounds**: NTSC cameras report `1001/30000`, which must
+  read as 30, not 29. Truncating would make a correctly granted request warn on
+  every launch.
+- **`is_satisfied_by` still ignores fps, deliberately**, and a test pins it.
+  Folding the rate into mode selection would make the Windows media-type search
+  demand an exact rate match and find nothing on a camera whose default differs.
+- **The V4L2 hardware tests now take a camera lock.** Three tests opening one
+  `/dev/video0` in parallel gave `VIDIOC_S_FMT: Device or resource busy` — the
+  same shape as the round-5 Windows mutex race. Falsified: 5 failures in 5 runs
+  without the guard, 0 in 5 with it.
+- **Not proven on this hardware:** every mode on the attached camera offers
+  exactly one rate, so the transition test skips. Windows and a multi-rate camera
+  are round 8.
+
 0.2.4 — 2026-09-02
 ------------------
 Windows negotiates too, and both backends now share one decision

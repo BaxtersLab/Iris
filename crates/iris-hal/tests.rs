@@ -229,6 +229,325 @@ mod tests {
                 "inconsistent frame sizes: {sizes:?}");
     }
 
+    /// Hardware: a rate the camera does not advertise must be reported and must
+    /// not break capture.
+    ///
+    /// This is the frame-rate test that **can** run on the attached hardware.
+    /// Every mode on this camera offers exactly 30fps, so the transition test
+    /// below has nothing to choose between and skips.
+    ///
+    /// **Be clear about what this does and does not prove.** It proves the
+    /// *never worse off* property: an impossible request does not fail the
+    /// open, the device settles on a rate it does advertise, capture still
+    /// delivers, and the difference is reportable. It does **not** prove the
+    /// request reached the driver — with only one advertised rate, a
+    /// `negotiate_fps` that did nothing at all would produce this same result.
+    /// Proving the request lands needs a camera offering two rates, which this
+    /// one does not; that is what the transition test below is for, and why it
+    /// skips rather than being deleted.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn v4l2_an_unadvertised_frame_rate_leaves_a_working_camera() {
+        if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
+            eprintln!("skipping v4l2_an_unadvertised_frame_rate_leaves_a_working_camera (set IRIS_USE_HW=1)");
+            return;
+        }
+        if !crate::v4l2_backend::v4l2::V4l2UvcBackend::video_nodes_present() {
+            eprintln!("SKIP: IRIS_USE_HW=1 but no /dev/video* node exists — no camera attached");
+            return;
+        }
+        let _camera = camera_guard();
+        use crate::backend::UvcBackend as _;
+        use crate::device::FormatRequest;
+        use crate::v4l2_backend::v4l2::V4l2UvcBackend;
+
+        let backend = V4l2UvcBackend::new();
+        let devs = backend.enumerate_devices().await.expect("enumerate failed");
+        assert!(!devs.is_empty(), "no capture devices");
+        let id = &devs[0].id;
+        let caps = backend.probe_capabilities(id).await.expect("probe failed");
+        let mode = caps.formats.first().cloned().expect("no formats advertised");
+        let rates = backend
+            .advertised_frame_rates(id, &mode)
+            .await
+            .expect("interval enumeration failed");
+
+        // Pick something the mode definitely does not offer.
+        let impossible = (1..=240u32).find(|r| !rates.contains(r)).expect("no free rate");
+        eprintln!(
+            "{}x{} {} offers {rates:?}; asking for {impossible}fps",
+            mode.width, mode.height, mode.pixel_format
+        );
+
+        let req = FormatRequest {
+            width: mode.width,
+            height: mode.height,
+            pixel_format: mode.pixel_format.clone(),
+            fps: impossible,
+        };
+        backend
+            .open_device(id, Some(&req))
+            .await
+            .expect("an impossible rate must not fail the open");
+        let got = backend
+            .current_format(id)
+            .await
+            .expect("current_format failed")
+            .expect("no current format");
+        // The camera must still deliver — this is the "never worse off" property.
+        let frame = backend.read_frame(id).await.expect("capture must still work");
+        backend.close_device(id).await.expect("close failed");
+
+        eprintln!("granted {}fps, frame of {} bytes", got.fps, frame.len());
+        assert!(!frame.is_empty(), "a frame must still arrive");
+        assert_ne!(
+            got.fps, impossible,
+            "the driver cannot have granted a rate it does not advertise"
+        );
+        assert!(
+            rates.is_empty() || rates.contains(&got.fps),
+            "the device settled on {}fps, which is not among the advertised {rates:?}",
+            got.fps
+        );
+        // And the mismatch must be describable rather than silent.
+        assert!(
+            req.describe_mismatch(got.width, got.height, &got.pixel_format, Some(got.fps))
+                .is_some(),
+            "an ungranted rate must be reportable"
+        );
+    }
+
+    /// Hardware: request two *different* advertised frame rates and confirm the
+    /// device follows — the rate twin of
+    /// `v4l2_negotiates_between_two_advertised_modes`, and a transition for the
+    /// same reason: a V4L2 device keeps the last interval set on it, so a
+    /// single match can be a coincidence left over from a previous run.
+    ///
+    /// Skips honestly when the attached camera offers only one rate for a mode.
+    /// A camera with nothing to choose between cannot demonstrate a choice, and
+    /// pretending otherwise would be the same false green this suite has now
+    /// caught twice.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn v4l2_negotiates_between_two_advertised_frame_rates() {
+        if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
+            eprintln!("skipping v4l2_negotiates_between_two_advertised_frame_rates (set IRIS_USE_HW=1)");
+            return;
+        }
+        if !crate::v4l2_backend::v4l2::V4l2UvcBackend::video_nodes_present() {
+            eprintln!("SKIP: IRIS_USE_HW=1 but no /dev/video* node exists — no camera attached");
+            return;
+        }
+        let _camera = camera_guard();
+        use crate::backend::UvcBackend as _;
+        use crate::device::FormatRequest;
+        use crate::v4l2_backend::v4l2::V4l2UvcBackend;
+
+        let backend = V4l2UvcBackend::new();
+        let devs = backend.enumerate_devices().await.expect("enumerate failed");
+        assert!(!devs.is_empty(), "no capture devices");
+        let id = &devs[0].id;
+        let caps = backend.probe_capabilities(id).await.expect("probe failed");
+        // Search EVERY advertised mode for one offering a choice of rate, not
+        // just the first. A camera commonly offers several rates only at lower
+        // resolutions, and testing the first mode alone would skip on hardware
+        // that could in fact demonstrate the transition.
+        let mut found = None;
+        for m in &caps.formats {
+            let rates = backend
+                .advertised_frame_rates(id, m)
+                .await
+                .expect("interval enumeration failed");
+            eprintln!(
+                "  {}x{} {} offers rates {rates:?}",
+                m.width, m.height, m.pixel_format
+            );
+            if rates.len() >= 2 && found.is_none() {
+                found = Some((m.clone(), rates));
+            }
+        }
+        let (mode, rates) = match found {
+            Some(v) => v,
+            None => {
+                eprintln!(
+                    "SKIP: no mode on this camera advertises more than one frame rate — \
+                     a transition cannot be demonstrated on this hardware. The negotiation \
+                     path itself is covered by the pure tests and by the live run."
+                );
+                return;
+            }
+        };
+        eprintln!(
+            "using {}x{} {} with rates {rates:?}",
+            mode.width, mode.height, mode.pixel_format
+        );
+
+        async fn ask(
+            backend: &V4l2UvcBackend,
+            id: &crate::device::DeviceId,
+            mode: &crate::device::FormatDescriptor,
+            fps: u32,
+        ) -> u32 {
+            let req = FormatRequest {
+                width: mode.width,
+                height: mode.height,
+                pixel_format: mode.pixel_format.clone(),
+                fps,
+            };
+            backend.open_device(id, Some(&req)).await.expect("open failed");
+            let got = backend
+                .current_format(id)
+                .await
+                .expect("current_format failed")
+                .expect("no current format");
+            backend.close_device(id).await.expect("close failed");
+            eprintln!("requested {fps}fps -> granted {}fps", got.fps);
+            got.fps
+        }
+        let first = ask(&backend, id, &mode, rates[0]).await;
+        let second = ask(&backend, id, &mode, rates[1]).await;
+
+        assert_ne!(
+            first, second,
+            "both requests returned the same rate — the interval is not reaching the driver"
+        );
+        assert_eq!(first, rates[0], "an advertised rate was requested but not granted");
+        assert_eq!(second, rates[1], "an advertised rate was requested but not granted");
+    }
+
+    /// One camera, one test at a time.
+    ///
+    /// libtest runs tests on parallel threads, and the V4L2 hardware tests all
+    /// open `/dev/video0` and call `VIDIOC_S_FMT`. A second opener gets
+    /// `Device or resource busy (os error 16)`, so without this they fail each
+    /// other intermittently depending on scheduling — which is exactly the
+    /// defect the Windows box found in round 5, where two single-instance tests
+    /// shared one process-global mutex name and failed 12 runs in 20.
+    ///
+    /// The unix lock test there solved it by giving each test its own resource.
+    /// That is not available here: there is only one camera, so the resource
+    /// has to be taken in turn instead.
+    #[cfg(target_os = "linux")]
+    static CAMERA: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the camera, tolerating a previous test having panicked while holding
+    /// it — a poisoned lock means another test failed, not that this one cannot
+    /// run, and reporting both failures is more useful than masking one.
+    #[cfg(target_os = "linux")]
+    fn camera_guard() -> std::sync::MutexGuard<'static, ()> {
+        CAMERA.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    // ---- frame rate ---------------------------------------------------------
+    //
+    // `capture.target_fps` was the THIRD config knob in the same struct to be
+    // validated, passed down, and honoured by the mock backend alone. It
+    // outlived two rounds of format negotiation because on Linux the interval
+    // is a different ioctl (`VIDIOC_S_PARM`) from the pixel mode (`S_FMT`), so
+    // it was never in the struct being fixed.
+
+    /// `timeperframe` must round, not truncate.
+    ///
+    /// NTSC-derived cameras report `1001/30000` — 29.97fps — which must read as
+    /// **30**. Truncating gives 29, which would make a correctly granted
+    /// request look like a mismatch and emit a warning on every single launch.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_frame_interval_becomes_whole_frames_per_second() {
+        use crate::v4l2_backend::v4l2::{V4l2Fract, V4l2UvcBackend};
+        let fps = |n: u32, d: u32| {
+            V4l2UvcBackend::fps_from_interval(&V4l2Fract {
+                numerator: n,
+                denominator: d,
+            })
+        };
+        assert_eq!(fps(1, 30), Some(30), "the ordinary case");
+        assert_eq!(fps(1, 15), Some(15));
+        assert_eq!(fps(1001, 30000), Some(30), "29.97 must round to 30, not 29");
+        assert_eq!(fps(1001, 60000), Some(60), "59.94 must round to 60");
+        // A zero either side is a driver that has told us nothing, which is a
+        // different thing from "zero frames per second".
+        assert_eq!(fps(0, 30), None, "a zero numerator is not 0fps");
+        assert_eq!(fps(1, 0), None, "a zero denominator is not 0fps");
+    }
+
+    /// `v4l2_streamparm` is 204 bytes, and the ioctl number encodes that size.
+    ///
+    /// Get it wrong and `S_PARM` fails with EINVAL in a way that reads as "the
+    /// driver refused the frame rate" rather than "the struct is the wrong
+    /// shape". The existing `v4l2_ioctl_numbers_match_abi` test exists for the
+    /// same reason.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn v4l2_streamparm_abi_matches_the_ioctl_number() {
+        use crate::v4l2_backend::v4l2::{V4l2StreamParm, VIDIOC_G_PARM, VIDIOC_S_PARM};
+        assert_eq!(std::mem::size_of::<V4l2StreamParm>(), 204);
+        const DIR_READ_WRITE: libc::c_ulong = 3 << 30;
+        let enc = |nr: libc::c_ulong, size: usize| -> libc::c_ulong {
+            DIR_READ_WRITE | ((size as libc::c_ulong) << 16) | (0x56 << 8) | nr
+        };
+        assert_eq!(VIDIOC_G_PARM, enc(21, std::mem::size_of::<V4l2StreamParm>()));
+        assert_eq!(VIDIOC_S_PARM, enc(22, std::mem::size_of::<V4l2StreamParm>()));
+    }
+
+    /// A frame-rate difference is a mismatch, and an unknown rate is not.
+    ///
+    /// `None` means the platform did not negotiate a rate — which is what the
+    /// Windows backend passes until it matches `MF_MT_FRAME_RATE`. Comparing
+    /// against a rate nobody read would invent mismatches out of nothing.
+    #[test]
+    fn an_unknown_frame_rate_is_not_a_mismatch_but_a_wrong_one_is() {
+        use crate::device::{FormatRequest, PixelFormat};
+        let req = FormatRequest {
+            width: 640,
+            height: 480,
+            pixel_format: PixelFormat::Yuyv,
+            fps: 30,
+        };
+        assert!(
+            req.describe_mismatch(640, 480, &PixelFormat::Yuyv, Some(30)).is_none(),
+            "the mode and the rate both granted: nothing to report"
+        );
+        assert!(
+            req.describe_mismatch(640, 480, &PixelFormat::Yuyv, None).is_none(),
+            "an unknown rate must not invent a mismatch"
+        );
+        let msg = req
+            .describe_mismatch(640, 480, &PixelFormat::Yuyv, Some(15))
+            .expect("a wrong rate is a mismatch even when the mode is right");
+        assert!(msg.contains("30fps"), "must name the rate asked for: {msg}");
+        assert!(msg.contains("15fps"), "must name the rate granted: {msg}");
+
+        // fps 0 means "do not ask", so no rate can be wrong.
+        let dont_care = FormatRequest { fps: 0, ..req.clone() };
+        assert!(
+            dont_care.describe_mismatch(640, 480, &PixelFormat::Yuyv, Some(5)).is_none(),
+            "fps 0 means the rate was never requested"
+        );
+    }
+
+    /// `is_satisfied_by` must keep ignoring `fps`, and that is a decision.
+    ///
+    /// It selects a native *mode*. Folding the rate in would make the Windows
+    /// media-type search demand an exact rate match and find nothing on a
+    /// camera whose default rate differs — turning a working negotiation into a
+    /// silent fallback. Pinned so nobody "fixes" it by symmetry.
+    #[test]
+    fn mode_selection_deliberately_ignores_the_frame_rate() {
+        use crate::device::{FormatRequest, PixelFormat};
+        let req = FormatRequest {
+            width: 640,
+            height: 480,
+            pixel_format: PixelFormat::Yuyv,
+            fps: 30,
+        };
+        assert!(
+            req.is_satisfied_by(640, 480, &PixelFormat::Yuyv),
+            "a mode matching on geometry and format satisfies the request \
+             regardless of rate — the rate is negotiated separately"
+        );
+    }
+
     // ---- format negotiation, the platform-independent half -----------------
     //
     // Contributed by the Windows box in round 7 and hoisted onto `FormatRequest`
@@ -253,6 +572,7 @@ mod tests {
             width: 640,
             height: 480,
             pixel_format: PixelFormat::Yuyv,
+            fps: 30,
         };
         assert!(req.is_satisfied_by(640, 480, &PixelFormat::Yuyv));
         // Each of the three fields alone must be enough to refuse.
@@ -274,12 +594,13 @@ mod tests {
             width: 640,
             height: 480,
             pixel_format: PixelFormat::Yuyv,
+            fps: 30,
         };
         assert!(
-            req.describe_mismatch(640, 480, &PixelFormat::Yuyv).is_none(),
+            req.describe_mismatch(640, 480, &PixelFormat::Yuyv, None).is_none(),
             "a granted request must be silent"
         );
-        let msg = req.describe_mismatch(1920, 1080, &PixelFormat::Nv12)
+        let msg = req.describe_mismatch(1920, 1080, &PixelFormat::Nv12, None)
             .expect("a refused request must say so");
         for needle in ["640x480", "YUYV", "1920x1080", "NV12"] {
             assert!(msg.contains(needle), "message must contain {needle}: {msg}");
@@ -293,13 +614,14 @@ mod tests {
             width: 3840,
             height: 2160,
             pixel_format: PixelFormat::Nv12,
+            fps: 30,
         };
         assert!(
-            default_cfg.describe_mismatch(3840, 2160, &PixelFormat::Nv12).is_none(),
+            default_cfg.describe_mismatch(3840, 2160, &PixelFormat::Nv12, None).is_none(),
             "an exact grant must be silent"
         );
         let msg = default_cfg
-            .describe_mismatch(1920, 1080, &PixelFormat::Mjpeg)
+            .describe_mismatch(1920, 1080, &PixelFormat::Mjpeg, None)
             .expect("a clamped mode must be reported");
         for needle in ["3840x2160", "1920x1080", "MJPEG"] {
             assert!(msg.contains(needle), "message must contain {needle}: {msg}");
@@ -355,6 +677,7 @@ mod tests {
                 width: want.width,
                 height: want.height,
                 pixel_format: want.pixel_format.clone(),
+                fps: 30,
             };
             backend.open_device(id, Some(&req)).await.expect("open failed");
             let got = backend
@@ -418,6 +741,7 @@ mod tests {
             width: 12345,
             height: 6789,
             pixel_format: PixelFormat::Yuyv,
+            fps: 30,
         };
         backend
             .open_device(id, Some(&req))
@@ -467,6 +791,7 @@ mod tests {
             eprintln!("SKIP: IRIS_USE_HW=1 but no /dev/video* node exists — no camera attached");
             return;
         }
+        let _camera = camera_guard();
         use crate::backend::UvcBackend as _;
         use crate::device::FormatRequest;
         use crate::v4l2_backend::v4l2::V4l2UvcBackend;
@@ -505,6 +830,7 @@ mod tests {
                 width: want.width,
                 height: want.height,
                 pixel_format: want.pixel_format.clone(),
+                fps: 30,
             };
             backend.open_device(id, Some(&req)).await.expect("open failed");
             let got = backend
@@ -595,6 +921,7 @@ mod tests {
             width: 640,
             height: 480,
             pixel_format: PixelFormat::Yuyv,
+            fps: 30,
         };
         V4l2UvcBackend::apply_request(&mut fmt, &req);
 
@@ -683,6 +1010,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn v4l2_enumerate_real_devices() {
+        let _camera = camera_guard();
         if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
             eprintln!("skipping v4l2_enumerate_real_devices (set IRIS_USE_HW=1)");
             return;
@@ -775,6 +1103,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn v4l2_open_bad_path_fails_cleanly_and_leaves_backend_closed() {
+        let _camera = camera_guard();
         use crate::backend::UvcBackend as _;
         use crate::device::DeviceId;
         use crate::error::HalError;
@@ -795,6 +1124,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn v4l2_capture_real_frames() {
+        let _camera = camera_guard();
         if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
             eprintln!("skipping v4l2_capture_real_frames (set IRIS_USE_HW=1)");
             return;

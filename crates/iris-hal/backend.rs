@@ -640,7 +640,11 @@ mod wmf {
                 // and a mode that was not granted is exactly what a caller most
                 // needs to hear about.
                 if let Some(req) = requested.as_ref() {
-                    match req.describe_mismatch(fd.width, fd.height, &fd.pixel_format) {
+                    // `None`: Windows does not negotiate a frame rate yet. Passing a
+                    // rate nobody read would invent mismatches; passing `None`
+                    // says "not asked here" honestly. Round 8 replaces this with
+                    // the rate matched from `MF_MT_FRAME_RATE`.
+                    match req.describe_mismatch(fd.width, fd.height, &fd.pixel_format, None) {
                         Some(diff) => tracing::warn!("format negotiation: {diff}"),
                         None => tracing::info!(
                             "format negotiation: granted {}x{} {} as requested",

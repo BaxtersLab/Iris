@@ -376,18 +376,41 @@ contribute **zero tests** — a question a green workspace total cannot answer.
       cosmetic the moment negotiation existed, because **negotiation can only
       request a mode Iris can see.**
 
-- [ ] **`capture.target_fps` is still honoured by the mock backend alone** —
-      found by the Windows box in round 7, confirmed here. `FormatRequest` is
-      `{width, height, pixel_format}`; the field reaches nothing but the mock's
-      own sleep (`iris-capture/src/backend.rs:81`), and there is no
-      `VIDIOC_S_PARM` anywhere in the V4L2 path. **This is the third instance of
-      the same defect shape** — a config knob validated, passed down, and
-      silently ignored by every real backend. The information is present on both
-      sides: MF media types carry `MF_MT_FRAME_RATE`, and `probe_capabilities`
-      already reads it into `FormatDescriptor::fps`. It is also why
-      `is_satisfied_by` ignores fps: a device offering one resolution at two
-      frame rates gets whichever the walk reaches first, with no way to ask for
-      the other.
+- [x] **LINUX DONE 2026-09-02 — `capture.target_fps` is negotiated.** It was the
+      **third** knob in the same struct honoured by the mock backend alone, and it
+      outlived two rounds of format negotiation for a structural reason worth
+      remembering: on Linux the interval is a **different ioctl**
+      (`VIDIOC_S_PARM`) from the pixel mode (`S_FMT`), so it was never in the
+      struct being fixed.
+
+      `negotiate_fps` runs after the format is set — the intervals a driver
+      offers depend on the mode it is now in — and falls back silently to the
+      existing interval when the driver does not advertise
+      `V4L2_CAP_TIMEPERFRAME` or refuses the call. `current_format` now reports
+      the **active** rate read back with `G_PARM` rather than `first_fps`, which
+      enumerated what a mode *offers* and returned the first: a fair guess before
+      anything was set and simply wrong afterwards.
+
+      **Live, asking for a rate this camera does not offer:**
+      ```
+      WARN frame rate: 15fps is not advertised for this mode (offered: [30]); asking anyway
+      WARN format negotiation: requested 640x480 YUYV @15fps but the device is delivering 640x480 YUYV @30fps
+      WARN capture config: requested ... @15fps but ... @30fps; telemetry follows the device
+      ```
+      The mode was granted and only the rate refused, and the message says so.
+
+      **What this does NOT prove, stated plainly:** every mode on the attached
+      camera advertises exactly **one** rate (30fps), so a `negotiate_fps` that
+      did nothing at all would produce the same result. The transition test
+      `v4l2_negotiates_between_two_advertised_frame_rates` exists and **skips**
+      on this hardware rather than being deleted. Proving the request reaches the
+      driver needs a camera offering two rates — **sent as round 8.**
+
+- [ ] **Windows: `capture.target_fps` is not negotiated.** `FormatRequest.fps`
+      reaches the WMF backend and is currently ignored; `describe_mismatch` is
+      passed `None` there, which is honest rather than silent. Media types carry
+      `MF_MT_FRAME_RATE` and `probe_capabilities` already reads it, so the
+      information is present. Round 8.
 
 
 - [ ] **REOPENED — the closure method, not just the item.** The 2026-08-31 proof

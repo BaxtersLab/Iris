@@ -41,6 +41,16 @@ pub struct FormatRequest {
     pub width: u32,
     pub height: u32,
     pub pixel_format: PixelFormat,
+    /// Frames per second. `0` means "do not ask", leaving the device's current
+    /// interval alone.
+    ///
+    /// Negotiated **separately from the pixel mode** on Linux — `VIDIOC_S_PARM`
+    /// carries the interval, `VIDIOC_S_FMT` carries width/height/fourcc — which
+    /// is exactly why this field outlived two rounds of format negotiation
+    /// still being honoured by the mock backend alone. It was never in the
+    /// struct being fixed. On Windows it is an attribute of the media type, so
+    /// the two platforms reach it by genuinely different routes.
+    pub fps: u32,
 }
 
 impl FormatRequest {
@@ -57,6 +67,20 @@ impl FormatRequest {
     /// V4L2 reaches the same place by the opposite route: `VIDIOC_S_FMT`
     /// *does* clamp and still returns success, so a difference there is normal
     /// and equally silent unless someone compares.
+    /// **`fps` is deliberately excluded**, and a test pins that.
+    ///
+    /// This decides which *native mode* satisfies the request, and frame rate is
+    /// not part of a mode on either platform in the same way: on Linux it is a
+    /// separate ioctl applied after the format is set, and on Windows a single
+    /// resolution/subtype pair is offered at several rates as distinct media
+    /// types. Folding fps in here would make the Windows search demand an exact
+    /// rate match and find nothing on a camera whose default rate differs —
+    /// turning a working negotiation into a silent fallback.
+    ///
+    /// The consequence is real and worth knowing: a device offering one
+    /// resolution at two frame rates gets whichever the search reaches first.
+    /// Choosing between them is `FormatRequest::fps`'s job, through the
+    /// platform's own mechanism.
     pub fn is_satisfied_by(&self, width: u32, height: u32, pixel_format: &PixelFormat) -> bool {
         self.width == width && self.height == height && self.pixel_format == *pixel_format
     }
@@ -65,18 +89,46 @@ impl FormatRequest {
     ///
     /// Names **both** sides on purpose: "not available" without saying what is
     /// running instead leaves a caller unable to tell whether anything is.
+    /// `granted_fps` is `Some` only where the platform actually negotiates a
+    /// frame rate. `None` means "not asked, or not knowable here" and the rate
+    /// is left out of the comparison entirely — which is honest, and is what
+    /// the Windows backend passes until it matches `MF_MT_FRAME_RATE`.
+    /// Comparing against a rate nobody read would invent mismatches.
     pub fn describe_mismatch(
         &self,
         width: u32,
         height: u32,
         pixel_format: &PixelFormat,
+        granted_fps: Option<u32>,
     ) -> Option<String> {
-        if self.is_satisfied_by(width, height, pixel_format) {
+        let mode_ok = self.is_satisfied_by(width, height, pixel_format);
+        // `fps == 0` means nothing was asked, so nothing can be wrong.
+        let fps_ok = match (self.fps, granted_fps) {
+            (0, _) | (_, None) => true,
+            (want, Some(got)) => want == got,
+        };
+        if mode_ok && fps_ok {
             return None;
         }
+        let fmt_rate = |r: Option<u32>| match r {
+            Some(v) => format!(" @{v}fps"),
+            None => String::new(),
+        };
+        let asked_rate = if self.fps == 0 {
+            String::new()
+        } else {
+            format!(" @{}fps", self.fps)
+        };
         Some(format!(
-            "requested {}x{} {} but the device is delivering {}x{} {}",
-            self.width, self.height, self.pixel_format, width, height, pixel_format
+            "requested {}x{} {}{} but the device is delivering {}x{} {}{}",
+            self.width,
+            self.height,
+            self.pixel_format,
+            asked_rate,
+            width,
+            height,
+            pixel_format,
+            fmt_rate(granted_fps)
         ))
     }
 }
