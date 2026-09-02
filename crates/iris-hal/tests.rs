@@ -25,7 +25,7 @@ mod tests {
     async fn open_close_device_flow() {
         let backend = MockUvcBackend::new();
         let id = DeviceId("mock-0".into());
-        backend.open_device(&id).await.unwrap();
+        backend.open_device(&id, None).await.unwrap();
         let frame = backend.read_frame(&id).await.unwrap();
         assert!(!frame.is_empty());
         backend.close_device(&id).await.unwrap();
@@ -123,7 +123,7 @@ mod tests {
         let devs = backend.enumerate_devices().await.expect("enumerate failed");
         assert!(!devs.is_empty(), "no camera found");
         let id = &devs[0].id;
-        backend.open_device(id).await.expect("open failed");
+        backend.open_device(id, None).await.expect("open failed");
 
         let controls = backend.list_controls(id).await.expect("list_controls failed");
         eprintln!("WMF exposed {} control(s):", controls.len());
@@ -215,7 +215,7 @@ mod tests {
         eprintln!("formats reported: {}", caps.formats.len());
         assert!(!caps.formats.is_empty(), "camera reported no formats");
 
-        backend.open_device(id).await.expect("open failed");
+        backend.open_device(id, None).await.expect("open failed");
         let mut sizes = Vec::new();
         for i in 0..5 {
             let frame = backend.read_frame(id).await.expect("read_frame failed");
@@ -230,6 +230,208 @@ mod tests {
     }
 
     // ---- V4L2 backend (Linux mirror of the WMF tests) ----------------------
+
+    /// Hardware: request two *different* advertised modes in turn and confirm
+    /// the device follows.
+    ///
+    /// Everything else about negotiation is testable without a camera; **this
+    /// is not.** The defect was that no request ever reached the driver, and no
+    /// pure-function test can tell asking from not asking.
+    ///
+    /// **It asserts a transition, not a single match, and that is the whole
+    /// design of it.** A V4L2 device *retains the last format set on it*, across
+    /// opens and across processes. The first version of this test requested one
+    /// mode and asserted it was granted — and it passed with negotiation
+    /// deliberately disabled, because an earlier run had already left the camera
+    /// in that mode and "adopt whatever it is in" returned the same answer. A
+    /// broken negotiation cannot produce two *different* formats from two
+    /// different requests, so the comparison between them is the real check.
+    #[cfg(target_os = "linux")] // these exercise the V4L2 module, which does not exist on Windows
+    #[tokio::test]
+    async fn v4l2_negotiates_between_two_advertised_modes() {
+        if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
+            eprintln!("skipping v4l2_negotiates_between_two_advertised_modes (set IRIS_USE_HW=1)");
+            return;
+        }
+        if !crate::v4l2_backend::v4l2::V4l2UvcBackend::video_nodes_present() {
+            eprintln!("SKIP: IRIS_USE_HW=1 but no /dev/video* node exists — no camera attached");
+            return;
+        }
+        use crate::backend::UvcBackend as _;
+        use crate::device::FormatRequest;
+        use crate::v4l2_backend::v4l2::V4l2UvcBackend;
+
+        let backend = V4l2UvcBackend::new();
+        let devs = backend.enumerate_devices().await.expect("enumerate failed");
+        assert!(!devs.is_empty(), "no capture devices");
+        let id = &devs[0].id;
+        let caps = backend.probe_capabilities(id).await.expect("probe failed");
+        assert!(caps.formats.len() >= 2, "need two modes to prove a transition");
+
+        let small = caps
+            .formats
+            .iter()
+            .min_by_key(|f| f.width * f.height)
+            .cloned()
+            .unwrap();
+        let large = caps
+            .formats
+            .iter()
+            .max_by_key(|f| f.width * f.height)
+            .cloned()
+            .unwrap();
+        assert_ne!(
+            (small.width, small.height),
+            (large.width, large.height),
+            "the two chosen modes must differ or the transition proves nothing"
+        );
+
+        async fn ask(
+            backend: &V4l2UvcBackend,
+            id: &crate::device::DeviceId,
+            want: &crate::device::FormatDescriptor,
+        ) -> (u32, u32, crate::device::PixelFormat) {
+            let req = FormatRequest {
+                width: want.width,
+                height: want.height,
+                pixel_format: want.pixel_format.clone(),
+            };
+            backend.open_device(id, Some(&req)).await.expect("open failed");
+            let got = backend
+                .current_format(id)
+                .await
+                .expect("current_format failed")
+                .expect("no current format");
+            backend.close_device(id).await.expect("close failed");
+            eprintln!(
+                "requested {}x{} {} -> granted {}x{} {}",
+                want.width, want.height, want.pixel_format,
+                got.width, got.height, got.pixel_format
+            );
+            (got.width, got.height, got.pixel_format)
+        }
+
+        // Largest first, then smallest. Whatever the camera was left in by a
+        // previous run, at least one of these two is a real change.
+        let got_large = ask(&backend, id, &large).await;
+        let got_small = ask(&backend, id, &small).await;
+
+        assert_ne!(
+            got_large, got_small,
+            "both requests returned the same mode — the request is not reaching the driver"
+        );
+        assert_eq!(
+            got_large,
+            (large.width, large.height, large.pixel_format.clone()),
+            "the large mode was advertised and requested but not granted"
+        );
+        assert_eq!(
+            got_small,
+            (small.width, small.height, small.pixel_format.clone()),
+            "the small mode was advertised and requested but not granted"
+        );
+    }
+
+    // ---- format negotiation (added 2026-09-02) ---------------------------
+    //
+    // Until this landed, `capture.pixel_format`, `capture.width` and
+    // `capture.height` were honoured by the MOCK backend alone: V4L2 read the
+    // driver's current mode and wrote the same struct straight back, and WMF
+    // never called SetCurrentMediaType. The knob was validated, passed down,
+    // and overwritten. These tests pin the asking, not the getting.
+
+    /// Every `PixelFormat` must survive a round trip through the fourcc map.
+    ///
+    /// The forward map already existed for *recognising* what a driver hands
+    /// back; the inverse is what lets Iris *ask*. If the two disagree, Iris
+    /// requests one format and then fails to recognise the identical format
+    /// coming back — which reads as a driver fault and is not one.
+    #[cfg(target_os = "linux")] // these exercise the V4L2 module, which does not exist on Windows
+    #[test]
+    fn every_pixel_format_round_trips_through_fourcc() {
+        use crate::device::PixelFormat;
+        use crate::v4l2_backend::v4l2::{fourcc_to_pixel_format, pixel_format_to_fourcc};
+        for f in [
+            PixelFormat::Yuyv,
+            PixelFormat::Nv12,
+            PixelFormat::Rgb24,
+            PixelFormat::Bgr24,
+            PixelFormat::Mjpeg,
+        ] {
+            let cc = pixel_format_to_fourcc(&f);
+            assert_eq!(
+                fourcc_to_pixel_format(cc),
+                Some(f.clone()),
+                "{f} did not survive the round trip through {cc:#010x}"
+            );
+        }
+    }
+
+    /// The request must actually reach the struct handed to `VIDIOC_S_FMT`.
+    /// This is the single line whose absence was the whole defect: the old code
+    /// wrote back the mode it had just read.
+    #[cfg(target_os = "linux")] // these exercise the V4L2 module, which does not exist on Windows
+    #[test]
+    fn a_request_is_written_into_the_format_struct() {
+        use crate::device::{FormatRequest, PixelFormat};
+        use crate::v4l2_backend::v4l2::{pixel_format_to_fourcc, V4l2Format, V4l2UvcBackend};
+        let mut fmt: V4l2Format = unsafe { std::mem::zeroed() };
+        // Pre-load it with the "adopted" mode, as G_FMT would.
+        fmt.pix.width = 1920;
+        fmt.pix.height = 1080;
+        fmt.pix.pixelformat = pixel_format_to_fourcc(&PixelFormat::Mjpeg);
+
+        let req = FormatRequest {
+            width: 640,
+            height: 480,
+            pixel_format: PixelFormat::Yuyv,
+        };
+        V4l2UvcBackend::apply_request(&mut fmt, &req);
+
+        assert_eq!(fmt.pix.width, 640, "the requested width must be written");
+        assert_eq!(fmt.pix.height, 480, "the requested height must be written");
+        assert_eq!(
+            fmt.pix.pixelformat,
+            pixel_format_to_fourcc(&PixelFormat::Yuyv),
+            "the requested pixel format must be written, not the adopted one"
+        );
+    }
+
+    /// `VIDIOC_S_FMT` **clamps and still returns success**, so a granted mode
+    /// that differs from the request is the normal case, not an error — and the
+    /// only way anyone finds out is if it is compared and said out loud.
+    #[cfg(target_os = "linux")] // these exercise the V4L2 module, which does not exist on Windows
+    #[test]
+    fn a_granted_mode_that_differs_from_the_request_is_described() {
+        use crate::device::{FormatRequest, PixelFormat};
+        use crate::v4l2_backend::v4l2::V4l2UvcBackend;
+        let req = FormatRequest {
+            width: 3840,
+            height: 2160,
+            pixel_format: PixelFormat::Nv12,
+        };
+
+        // Exactly what was asked for: nothing to report.
+        assert_eq!(
+            V4l2UvcBackend::describe_mismatch(&req, 3840, 2160, &PixelFormat::Nv12),
+            None,
+            "an exact grant must not be reported as a mismatch"
+        );
+
+        // The real case from this box: asked 4K NV12, got 1080p MJPEG.
+        let diff = V4l2UvcBackend::describe_mismatch(&req, 1920, 1080, &PixelFormat::Mjpeg)
+            .expect("a clamped mode must be reported");
+        assert!(diff.contains("3840x2160"), "must name what was asked: {diff}");
+        assert!(diff.contains("1920x1080"), "must name what was granted: {diff}");
+        assert!(diff.contains("MJPEG"), "must name the granted format: {diff}");
+
+        // Format alone differing is still a mismatch — size matching is not
+        // enough, and this is the case a size-only check would miss.
+        assert!(
+            V4l2UvcBackend::describe_mismatch(&req, 3840, 2160, &PixelFormat::Yuyv).is_some(),
+            "a format-only difference must still be reported"
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -406,7 +608,7 @@ mod tests {
 
         let backend = V4l2UvcBackend::new();
         let id = DeviceId("/dev/null".into());
-        assert!(backend.open_device(&id).await.is_err(), "/dev/null is not a capture device");
+        assert!(backend.open_device(&id, None).await.is_err(), "/dev/null is not a capture device");
         // the failed open must not have left a half-open device behind
         assert!(
             matches!(backend.read_frame(&id).await, Err(HalError::DeviceNotOpen)),
@@ -446,7 +648,7 @@ mod tests {
         let id = devs[0].id.clone();
         eprintln!("opening {} — {}", devs[0].id, devs[0].name);
 
-        backend.open_device(&id).await.expect("open_device failed");
+        backend.open_device(&id, None).await.expect("open_device failed");
 
         let fmt = backend
             .current_format(&id)
@@ -464,7 +666,7 @@ mod tests {
 
         assert!(
             matches!(
-                backend.open_device(&id).await,
+                backend.open_device(&id, None).await,
                 Err(HalError::DeviceAlreadyOpen)
             ),
             "opening an already-open device must be refused"

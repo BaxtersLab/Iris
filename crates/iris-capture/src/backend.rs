@@ -175,16 +175,52 @@ impl<U: iris_hal::backend::UvcBackend> CaptureBackend for UvcCaptureBackend<U> {
                 .cloned()
                 .unwrap_or_else(|| devices[0].clone())
         };
+        // Capture what the config asked for **before** opening. Adopting the
+        // granted mode below overwrites these fields, which is correct for
+        // telemetry and destroys the only record of the request — so the
+        // comparison has to be taken first.
+        let requested = iris_hal::device::FormatRequest {
+            width: self.config.width,
+            height: self.config.height,
+            pixel_format: self.config.format.clone(),
+        };
         tracing::info!("UvcCaptureBackend: opening {} ({})", chosen.name, chosen.id);
-        self.uvc.open_device(&chosen.id).await.map_err(Self::map_err)?;
+        self.uvc
+            .open_device(&chosen.id, Some(&requested))
+            .await
+            .map_err(Self::map_err)?;
         // Adopt the format the device is ACTUALLY delivering so telemetry
         // (width/height/format) is authoritative, not the configured request.
+        //
+        // This adoption was never the bug. The bug was that nothing was ever
+        // *requested* before it, so `capture.pixel_format`, `capture.width` and
+        // `capture.height` were honoured by the mock backend alone while every
+        // real camera silently kept whatever mode it was already in.
         if let Ok(Some(actual)) = self.uvc.current_format(&chosen.id).await {
             if actual.width > 0 && actual.height > 0 {
                 tracing::info!(
                     "UvcCaptureBackend: device mode {}x{} {}",
                     actual.width, actual.height, actual.pixel_format
                 );
+                // A device is free to grant something other than what was asked
+                // for, and on Windows nothing is asked for at all yet. Either
+                // way the operator configured one thing and is getting another,
+                // which is worth one line rather than none.
+                if actual.width != requested.width
+                    || actual.height != requested.height
+                    || actual.pixel_format != requested.pixel_format
+                {
+                    tracing::warn!(
+                        "capture config asked for {}x{} {} but the device is delivering \
+                         {}x{} {}; telemetry follows the device",
+                        requested.width,
+                        requested.height,
+                        requested.pixel_format,
+                        actual.width,
+                        actual.height,
+                        actual.pixel_format
+                    );
+                }
                 self.config.width = actual.width;
                 self.config.height = actual.height;
                 self.config.format = actual.pixel_format;

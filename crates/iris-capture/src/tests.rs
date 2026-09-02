@@ -466,7 +466,7 @@ mod mjpeg_hardware_tests {
         assert!(!devs.is_empty(), "no capture device present");
         let id = devs[0].id.clone();
 
-        backend.open_device(&id).await.expect("open failed");
+        backend.open_device(&id, None).await.expect("open failed");
         let fmt = backend
             .current_format(&id)
             .await

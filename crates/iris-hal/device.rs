@@ -24,6 +24,25 @@ pub struct FormatDescriptor {
     pub pixel_format: PixelFormat,
 }
 
+/// A capture format the caller would like the device to deliver.
+///
+/// **Advisory, not a command.** V4L2's `VIDIOC_S_FMT` and Media Foundation's
+/// `SetCurrentMediaType` both *negotiate*: the driver is free to substitute the
+/// nearest mode it supports, and it reports what it actually granted. So a
+/// caller must read back what it got rather than assume — which is why
+/// `current_format` stays authoritative for telemetry.
+///
+/// This type exists because for most of Iris's life nothing was requested at
+/// all: `capture.pixel_format`, `capture.width` and `capture.height` were
+/// validated, passed down, and then overwritten by whatever mode the device
+/// happened to already be in. The knob was honoured by the mock backend alone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormatRequest {
+    pub width: u32,
+    pub height: u32,
+    pub pixel_format: PixelFormat,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PixelFormat {
     Rgb24,

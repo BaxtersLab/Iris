@@ -21,7 +21,7 @@ pub mod v4l2 {
     use crate::backend::UvcBackend;
     use crate::device::{
         ControlCapabilityInfo, DeviceCapabilities, DeviceId, DeviceInfo, FormatDescriptor,
-        PixelFormat,
+        PixelFormat, FormatRequest,
     };
     use crate::error::{HalError, HalResult};
     use async_trait::async_trait;
@@ -125,10 +125,12 @@ pub mod v4l2 {
 
     #[repr(C)]
     #[derive(Clone, Copy)]
-    struct V4l2PixFormat {
-        width: u32,
-        height: u32,
-        pixelformat: u32,
+    pub(crate) struct V4l2PixFormat {
+        // `pub(crate)` on the three fields negotiation writes, so the test that
+        // pins the write can read them back. The rest stay private.
+        pub(crate) width: u32,
+        pub(crate) height: u32,
+        pub(crate) pixelformat: u32,
         field: u32,
         bytesperline: u32,
         sizeimage: u32,
@@ -143,10 +145,10 @@ pub mod v4l2 {
     /// `type` + 4 bytes of padding (the union is 8-aligned because some of its
     /// members contain pointers) + a 200-byte union = 208 bytes.
     #[repr(C)]
-    struct V4l2Format {
+    pub(crate) struct V4l2Format {
         typ: u32,
         _pad: u32,
-        pix: V4l2PixFormat,
+        pub(crate) pix: V4l2PixFormat,
         _union_tail: [u8; 200 - std::mem::size_of::<V4l2PixFormat>()],
     }
 
@@ -216,6 +218,23 @@ pub mod v4l2 {
     // ---- helpers ----------------------------------------------------------
 
     /// FourCC little-endian code -> Iris PixelFormat (None = unsupported).
+    /// The inverse of `fourcc_to_pixel_format`, for asking a driver for a
+    /// format rather than only recognising what it hands back.
+    ///
+    /// Deliberately exhaustive with no catch-all: a new `PixelFormat` variant
+    /// must not compile until someone decides what fourcc to request for it.
+    /// The alternative — returning `None` for anything unmapped — is how the
+    /// MJPG modes went missing from enumeration on both platforms.
+    pub fn pixel_format_to_fourcc(f: &PixelFormat) -> u32 {
+        match f {
+            PixelFormat::Yuyv => 0x5659_5559,  // 'YUYV'
+            PixelFormat::Nv12 => 0x3231_564e,  // 'NV12'
+            PixelFormat::Rgb24 => 0x3342_4752, // 'RGB3'
+            PixelFormat::Bgr24 => 0x3352_4742, // 'BGR3'
+            PixelFormat::Mjpeg => 0x4750_4a4d, // 'MJPG'
+        }
+    }
+
     pub fn fourcc_to_pixel_format(fourcc: u32) -> Option<PixelFormat> {
         match fourcc {
             0x5659_5559 => Some(PixelFormat::Yuyv),  // 'YUYV'
@@ -360,8 +379,42 @@ pub mod v4l2 {
             }
         }
 
+        /// Apply a `FormatRequest` to a `v4l2_format` in place.
+        ///
+        /// Split out from `open_sync` because everything either side of it is an
+        /// ioctl: this is the part that decides *what gets asked for*, and it is
+        /// the part worth testing without a camera attached.
+        pub(crate) fn apply_request(fmt: &mut V4l2Format, req: &FormatRequest) {
+            fmt.pix.width = req.width;
+            fmt.pix.height = req.height;
+            fmt.pix.pixelformat = pixel_format_to_fourcc(&req.pixel_format);
+        }
+
+        /// Did the driver grant what was asked for?
+        ///
+        /// Returns `None` when it did, or a description of the difference when
+        /// it did not. `VIDIOC_S_FMT` **clamps rather than fails** — ask a 1080p
+        /// camera for 4K and it returns 1080p with a success code — so the only
+        /// way to know is to compare, and the only honest thing to do with a
+        /// difference is say it out loud.
+        pub(crate) fn describe_mismatch(
+            req: &FormatRequest,
+            granted_w: u32,
+            granted_h: u32,
+            granted_fmt: &PixelFormat,
+        ) -> Option<String> {
+            if req.width == granted_w && req.height == granted_h && req.pixel_format == *granted_fmt
+            {
+                return None;
+            }
+            Some(format!(
+                "requested {}x{} {} but the driver granted {}x{} {}",
+                req.width, req.height, req.pixel_format, granted_w, granted_h, granted_fmt
+            ))
+        }
+
         /// Open the node, negotiate a format, map buffers, start streaming.
-        fn open_sync(id: &DeviceId) -> HalResult<OpenDevice> {
+        fn open_sync(id: &DeviceId, requested: Option<&FormatRequest>) -> HalResult<OpenDevice> {
             let fd = open_node(&id.0).ok_or(HalError::DeviceNotFound)?;
             let raw = fd.as_raw_fd();
             let cap = query_cap(raw).ok_or(HalError::Io("VIDIOC_QUERYCAP failed".into()))?;
@@ -372,11 +425,8 @@ pub mod v4l2 {
                 )));
             }
 
-            // Adopt the mode the driver is already in, then write it back so the
-            // driver tells us what it actually granted. This mirrors the WMF
-            // backend, which treats GetCurrentMediaType as authoritative rather
-            // than asserting a requested resolution — telemetry must report the
-            // format being delivered, not the one we asked for.
+            // Read the driver's current mode first, so any field we do not set
+            // keeps a value the driver already accepted.
             let mut fmt: V4l2Format = unsafe { std::mem::zeroed() };
             fmt.typ = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             if unsafe { xioctl(raw, VIDIOC_G_FMT, &mut fmt as *mut _ as *mut _) } == -1 {
@@ -385,12 +435,45 @@ pub mod v4l2 {
                     std::io::Error::last_os_error()
                 )));
             }
+            let adopted = fmt.pix;
+
+            // Then ASK for the configured mode.
+            //
+            // Until 2026-09-02 this wrote the struct straight back unchanged —
+            // it adopted whatever mode the device was already in and never
+            // requested anything, so `capture.pixel_format`, `capture.width` and
+            // `capture.height` were honoured by the mock backend alone. Asking
+            // is the whole point of this block.
+            //
+            // `S_FMT` **negotiates**: it clamps to the nearest supported mode and
+            // still returns success, so the granted values are read back below
+            // and remain authoritative for telemetry. Requesting is not the same
+            // as receiving, and the caller is told when they differ.
+            if let Some(req) = requested {
+                Self::apply_request(&mut fmt, req);
+            }
             fmt.pix.field = V4L2_FIELD_NONE;
             if unsafe { xioctl(raw, VIDIOC_S_FMT, &mut fmt as *mut _ as *mut _) } == -1 {
-                return Err(HalError::Io(format!(
-                    "VIDIOC_S_FMT: {}",
-                    std::io::Error::last_os_error()
-                )));
+                let first_err = std::io::Error::last_os_error();
+                if requested.is_none() {
+                    return Err(HalError::Io(format!("VIDIOC_S_FMT: {first_err}")));
+                }
+                // A driver may reject a requested mode outright rather than
+                // clamp it. Fall back to the mode it was already in, so asking
+                // for something unsupported can never leave a working camera
+                // worse off than before negotiation existed.
+                tracing::warn!(
+                    "VIDIOC_S_FMT rejected the requested format ({first_err}); \
+                     falling back to the device's current mode"
+                );
+                fmt.pix = adopted;
+                fmt.pix.field = V4L2_FIELD_NONE;
+                if unsafe { xioctl(raw, VIDIOC_S_FMT, &mut fmt as *mut _ as *mut _) } == -1 {
+                    return Err(HalError::Io(format!(
+                        "VIDIOC_S_FMT: {}",
+                        std::io::Error::last_os_error()
+                    )));
+                }
             }
             // S_FMT rewrites the struct in place with the granted format.
             let granted = fmt.pix;
@@ -400,6 +483,20 @@ pub mod v4l2 {
                     granted.pixelformat
                 ))
             })?;
+            // Say so when the driver did not grant what was asked. Silence here
+            // is indistinguishable from success, and a clamped mode is exactly
+            // the case a caller most needs to know about.
+            if let Some(req) = requested {
+                match Self::describe_mismatch(req, granted.width, granted.height, &pixel_format) {
+                    Some(diff) => tracing::warn!("format negotiation: {diff}"),
+                    None => tracing::info!(
+                        "format negotiation: granted {}x{} {} as requested",
+                        granted.width,
+                        granted.height,
+                        pixel_format
+                    ),
+                }
+            }
             let format = FormatDescriptor {
                 width: granted.width,
                 height: granted.height,
@@ -789,15 +886,20 @@ pub mod v4l2 {
                 .map_err(|e| HalError::Io(format!("spawn_blocking join error: {e:?}")))?
         }
 
-        async fn open_device(&self, id: &DeviceId) -> HalResult<()> {
+        async fn open_device(
+            &self,
+            id: &DeviceId,
+            requested: Option<&FormatRequest>,
+        ) -> HalResult<()> {
             let state = Arc::clone(&self.state);
             let id = id.clone();
+            let requested = requested.cloned();
             tokio::task::spawn_blocking(move || {
                 let mut guard = state.lock().unwrap();
                 if guard.is_some() {
                     return Err(HalError::DeviceAlreadyOpen);
                 }
-                *guard = Some(V4l2UvcBackend::open_sync(&id)?);
+                *guard = Some(V4l2UvcBackend::open_sync(&id, requested.as_ref())?);
                 Ok(())
             })
             .await

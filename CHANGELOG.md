@@ -13,6 +13,36 @@ the upgrade, so a published build would never reach anyone who already had one.
 `build_deb.sh` now refuses to build when the package version and the `iris-ui`
 crate version disagree.
 
+0.2.3 — 2026-09-02
+------------------
+Capture format is negotiated on Linux — the config knob was decorative
+- **`capture.pixel_format`, `capture.width` and `capture.height` were honoured by
+  the MOCK backend alone.** V4L2's `open_sync` did `VIDIOC_G_FMT`, set
+  `field = NONE`, and wrote the **same struct** back — it adopted whatever mode
+  the device was already in and never requested the configured one. Above it,
+  `UvcCaptureBackend::start` overwrote the configured values with whatever
+  arrived. Asked for `3840x2160 nv12`, got `1920x1080 MJPEG`, silently.
+- **V4L2 now asks.** The requested width, height and fourcc are written into the
+  `v4l2_format` before `S_FMT`, and what the driver granted is read back and
+  reported — as an `info` line when it matches and a `warn` when it does not,
+  because `S_FMT` **clamps and still returns success**, so a silent difference
+  is the normal failure mode. If a driver rejects the request outright, it falls
+  back to the device's current mode: asking for something unsupported can never
+  leave a working camera worse off than before negotiation existed.
+- **`open_device` takes the request on the trait**, not as a defaulted method. A
+  default that quietly ignored it is exactly how this knob died the first time;
+  now a new backend cannot compile without deciding what to do with it.
+- **The YUYV decode arm is reachable at last.** Added 2026-09-01, correct, tested
+  and dead — nothing could ask for YUYV. `iris.toml` with `pixel_format = "yuyv"`
+  now yields `granted 640x480 YUYV as requested`, 614 400-byte frames
+  (`640*480*2`) and `GET /frame` returning a real 640x480 JPEG through it.
+- **Windows still does not negotiate** — `WmfBackend` never calls
+  `SetCurrentMediaType`. It now **says so** when handed a request instead of
+  dropping it silently. Implementing it needs a Windows box; sent as round 7.
+- `pixel_format_to_fourcc` is the inverse of the existing `fourcc_to_pixel_format`
+  and is deliberately exhaustive: a new `PixelFormat` cannot compile until
+  someone decides what to request for it.
+
 0.2.2 — 2026-09-01
 ------------------
 `RingBufferOverflow` told three lies at once, and is now `RingBufferRecycled`

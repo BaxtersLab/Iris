@@ -318,22 +318,45 @@ contribute **zero tests** — a question a green workspace total cannot answer.
 
 ## Config surface — declared but not routed, opened 2026-08-31, **REOPENED 2026-09-02**
 
-- [ ] **REOPENED — `capture.pixel_format`, `capture.width` and `capture.height` are
-      honoured by the MOCK backend only, and ignored by every real camera on both
-      platforms.** The 2026-08-31 item below is not wrong about what it fixed — it
+- [x] **LINUX DONE 2026-09-02 — V4L2 now negotiates.** `open_sync` fills the
+      `v4l2_format` with the requested width, height and fourcc before
+      `VIDIOC_S_FMT` instead of writing back the mode it just read, and reports
+      what the driver granted. If the driver rejects the request outright it
+      falls back to the device's current mode, so asking for something
+      unsupported can never leave a working camera worse off than before
+      negotiation existed. `open_device` now takes `Option<&FormatRequest>` on
+      the **trait**, not as a defaulted method — a default that ignored the
+      request is precisely how this knob died the first time.
+
+      **Proven on hardware, and the first version of the proof was wrong.** A
+      test that requested one mode and asserted it was granted **passed with
+      negotiation disabled**, because a V4L2 device retains the last format set
+      on it and an earlier run had already left the camera in that mode. The
+      test now requests two different advertised modes in turn and asserts they
+      differ — which a broken negotiation cannot fake. Falsified: with the
+      request suppressed, both requests return 320x240 and the test fails.
+
+      **End to end:** `iris.toml` asking for `640x480 yuyv` produced
+      `format negotiation: granted 640x480 YUYV as requested`, frames of
+      614 400 bytes (`640*480*2`, exactly YUYV), and `GET /frame` returning a
+      real 640x480 JPEG **through the YUYV decode arm** — the arm added
+      2026-09-01 that had been correct, tested and unreachable until now.
+
+- [ ] **STILL OPEN (Windows) — `capture.pixel_format`, `capture.width` and
+      `capture.height` are ignored by the WMF backend.** The 2026-08-31 item below is not wrong about what it fixed — it
       routed the config into `CaptureConfig` — but its proof was measured against
       the one backend that reads those fields, so the fix was never true for
       hardware.
 
-      `UvcCaptureBackend::start` (`iris-capture/src/backend.rs:190-192`) overwrites
-      `config.width`, `config.height` and `config.format` with whatever the device
-      is already delivering. Underneath it, neither backend ever asks:
+      `WmfBackend::open_device` never calls `SetCurrentMediaType` — `grep` returns
+      nothing — so it accepts whatever media type Media Foundation defaults to.
+      It now **says so** when handed a request rather than dropping it silently,
+      which is the declaration Article VII asks for, not a fix.
 
-      * **V4L2** (`v4l2_backend.rs::open_sync`) does `VIDIOC_G_FMT`, sets
-        `field = NONE`, and writes the **same struct** back with `VIDIOC_S_FMT`. It
-        adopts the driver's current mode; it never requests the configured one.
-      * **WMF** (`iris-hal/backend.rs`) never calls `SetCurrentMediaType` at all —
-        `grep` returns nothing — so it accepts MF's default type.
+      Implementing it needs a Windows box: a search over the native media types
+      for the requested one, a defined fallback when it is absent, and
+      `current_width`/`current_height` kept in step with the result. **Sent as
+      round 7.**
 
       **Measured on Linux, 2026-09-02, no config file:**
       ```
@@ -352,10 +375,8 @@ contribute **zero tests** — a question a green workspace total cannot answer.
       YUY2 — at which point it silently becomes load-bearing. And every resolution
       `probe_capabilities` enumerates is unselectable.
 
-      **Fixing it is a feature, not a repair:** format negotiation needs a
-      requested-mode search, a defined fallback when the device refuses, and
-      `current_width`/`current_height` kept in step with the result. Declared here
-      rather than guessed at. **Operator decision.**
+      Until then the YUYV arm stays unreachable at runtime on Windows, and every
+      resolution `probe_capabilities` enumerates there is unselectable.
 
 - [ ] **REOPENED — the closure method, not just the item.** The 2026-08-31 proof
       cites `size_bytes` of `460800` (640x480x1.5, NV12) and `614400` (x2, YUY2).

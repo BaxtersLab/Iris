@@ -10,7 +10,20 @@ use std::sync::{Arc, Mutex};
 pub trait UvcBackend: Send + Sync + 'static {
     async fn enumerate_devices(&self) -> HalResult<Vec<DeviceInfo>>;
     async fn probe_capabilities(&self, id: &DeviceId) -> HalResult<DeviceCapabilities>;
-    async fn open_device(&self, id: &DeviceId) -> HalResult<()>;
+    /// Open the device, asking for `requested` if the backend can.
+    ///
+    /// The request is **advisory**: drivers negotiate, and a backend must read
+    /// back what it actually got — `current_format` stays authoritative. The
+    /// parameter is on the trait rather than defaulted away on purpose. A
+    /// defaulted `open_device_with` that quietly ignored the request is exactly
+    /// how `capture.pixel_format` came to be honoured by the mock backend alone
+    /// for months; making it part of the signature means a new backend cannot
+    /// compile without deciding what to do with it.
+    async fn open_device(
+        &self,
+        id: &DeviceId,
+        requested: Option<&crate::device::FormatRequest>,
+    ) -> HalResult<()>;
     async fn close_device(&self, id: &DeviceId) -> HalResult<()>;
     async fn read_frame(&self, id: &DeviceId) -> HalResult<Vec<u8>>;
     async fn list_controls(&self, id: &DeviceId) -> HalResult<Vec<ControlCapabilityInfo>>;
@@ -81,7 +94,11 @@ impl UvcBackend for MockUvcBackend {
             .ok_or(HalError::DeviceNotFound)
     }
 
-    async fn open_device(&self, id: &DeviceId) -> HalResult<()> {
+    async fn open_device(
+        &self,
+        id: &DeviceId,
+        _requested: Option<&crate::device::FormatRequest>,
+    ) -> HalResult<()> {
         let mut open = self.open_set.lock().unwrap();
         if open.contains(&id.0) {
             return Err(HalError::DeviceAlreadyOpen);
@@ -479,7 +496,30 @@ mod wmf {
             .map_err(|e| HalError::Io(format!("spawn_blocking: {e}")))?
         }
 
-        async fn open_device(&self, id: &DeviceId) -> HalResult<()> {
+        /// **Format negotiation is not implemented on Windows.** This path never
+        /// calls `SetCurrentMediaType`; it accepts whatever media type Media
+        /// Foundation defaults to. A request is therefore accepted and **not**
+        /// honoured, and that is said out loud rather than dropped silently —
+        /// the silent version is what hid this for months.
+        ///
+        /// Implementing it needs a Windows box: a search over the native media
+        /// types for the requested one, a defined fallback when it is absent,
+        /// and `current_width`/`current_height` kept in step with the result.
+        /// Declared in `ROADMAP.md` under the round-6 Windows findings.
+        async fn open_device(
+            &self,
+            id: &DeviceId,
+            requested: Option<&crate::device::FormatRequest>,
+        ) -> HalResult<()> {
+            if let Some(req) = requested {
+                tracing::warn!(
+                    "format negotiation is not implemented on Windows: requested {}x{} {} \
+                     will be ignored and the device's default media type used instead",
+                    req.width,
+                    req.height,
+                    req.pixel_format
+                );
+            }
             let dev_id = id.0.clone();
 
             // Create reader + detect current format on blocking thread, then

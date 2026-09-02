@@ -94,6 +94,18 @@ IRIS_UI_HEADLESS=1 ...                   # scripted headless run (no window)
 IRIS_DEVICE=<id-or-name-substring>       # pick a specific camera
 ```
 
+`iris.toml`'s `capture.width`, `capture.height` and `capture.pixel_format` are
+**requests**, and as of 0.2.3 Linux actually makes them. A driver may grant
+something else — `VIDIOC_S_FMT` clamps to the nearest supported mode and still
+reports success — so Iris reads back what it got and logs the difference rather
+than assuming. Telemetry always describes the stream being delivered.
+
+**Windows does not negotiate yet**: the WMF path accepts Media Foundation's
+default media type and logs a warning that the request is being ignored.
+
+```sh
+```
+
 ### Configuration
 
 `iris.toml` is read from **the directory containing the executable** — so

@@ -376,7 +376,11 @@ impl UvcBackend for FakeBackend {
     async fn probe_capabilities(&self, _id: &DeviceId) -> HalResult<DeviceCapabilities> {
         Ok(DeviceCapabilities { formats: vec![] })
     }
-    async fn open_device(&self, _id: &DeviceId) -> HalResult<()> {
+    async fn open_device(
+        &self,
+        _id: &DeviceId,
+        _requested: Option<&iris_hal::device::FormatRequest>,
+    ) -> HalResult<()> {
         Ok(())
     }
     async fn close_device(&self, _id: &DeviceId) -> HalResult<()> {
