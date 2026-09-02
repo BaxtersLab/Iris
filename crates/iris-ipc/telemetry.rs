@@ -131,8 +131,25 @@ pub enum TelemetryEvent {
         frame_sequence: u64,
         latency_us: u64,
     },
-    RingBufferOverflow {
-        dropped_frames: u64,
+    /// The pull ring recycled slots — it overwrote frames nothing had read.
+    ///
+    /// **This is normal operation, not an incident.** The ring is deliberately
+    /// lossy: a pull consumer asks "what do you see right now" and always wants
+    /// the newest frame, so overwriting older ones is the design working. It is
+    /// reported because the *rate* is diagnostic — a ring recycling far faster
+    /// than a consumer reads means the ring is too small or the consumer too
+    /// slow — not because any frame was owed to anybody.
+    ///
+    /// It was called `RingBufferOverflow { dropped_frames }` until 2026-09-01,
+    /// which was wrong three separate ways: nothing overflowed, nothing was
+    /// dropped, and the number was the lifetime total rather than this event's
+    /// count. See `iris-stream`'s `report_recycled`.
+    RingBufferRecycled {
+        /// Frames overwritten **since the previous report**.
+        overwritten: u64,
+        /// Frames overwritten since the service started. Matches
+        /// `StreamStats::ring_buffer_overwrites`.
+        total_overwritten: u64,
     },
 
     HealthCheck {

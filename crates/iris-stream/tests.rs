@@ -78,7 +78,7 @@ fn the_latest_frame_is_the_last_written() {
     assert_eq!(latest.data[0], 3);
     assert_eq!(rb.len(), 3);
     assert_eq!(rb.total_written(), 3);
-    assert_eq!(rb.overflow_count(), 0, "nothing was overwritten yet");
+    assert_eq!(rb.overwrite_count(), 0, "nothing was overwritten yet");
 }
 
 /// Age indexing, not slot indexing. The block-G1 spec indexed `slots[index]`
@@ -104,9 +104,9 @@ fn overwriting_counts_as_overflow() {
     let mut rb = RingBuffer::new(2);
     rb.write(&frame(1, 1));
     rb.write(&frame(2, 2));
-    assert_eq!(rb.overflow_count(), 0);
+    assert_eq!(rb.overwrite_count(), 0);
     rb.write(&frame(3, 3));
-    assert_eq!(rb.overflow_count(), 1, "the third write displaced the first");
+    assert_eq!(rb.overwrite_count(), 1, "the third write displaced the first");
     assert_eq!(rb.usage(), 1.0);
 }
 
@@ -128,6 +128,123 @@ fn harness(mode: StreamMode, ring: usize, max_subs: usize) -> Harness {
         handle,
         telemetry,
     }
+}
+
+/// A harness with the recycle-report throttle chosen by the test.
+///
+/// `Duration::ZERO` reports every overwrite (so the delta is observable one
+/// frame at a time); a long interval reports only the first (so the throttle
+/// is observable without waiting a real second).
+fn harness_recycle(
+    mode: StreamMode,
+    ring: usize,
+    max_subs: usize,
+    interval: std::time::Duration,
+) -> Harness {
+    let (frame_tx, frame_rx) = mpsc::channel(16);
+    let (tel_tx, telemetry) = broadcast::channel(256);
+    let (svc, handle) =
+        StreamService::with_recycle_interval(frame_rx, tel_tx, mode, ring, max_subs, interval);
+    tokio::spawn(svc.run());
+    Harness {
+        frame_tx,
+        handle,
+        telemetry,
+    }
+}
+
+/// Just the recycle events, in order, as `(overwritten, total_overwritten)`.
+fn recycles(rx: &mut broadcast::Receiver<TelemetryEnvelope>) -> Vec<(u64, u64)> {
+    drain(rx)
+        .into_iter()
+        .filter_map(|e| match e {
+            TelemetryEvent::RingBufferRecycled {
+                overwritten,
+                total_overwritten,
+            } => Some((overwritten, total_overwritten)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Feed `n` frames and let the service drain them.
+async fn feed(h: &Harness, n: u64) {
+    for i in 1..=n {
+        h.frame_tx.send(frame(i, i as u8)).await.expect("send");
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+}
+
+// ---- ring recycling telemetry --------------------------------------------
+//
+// Until 2026-09-01 this event was `RingBufferOverflow { dropped_frames }`, it
+// carried the **lifetime** overwrite count in a field named as if it were this
+// event's count, and it fired on **every frame** once the ring was full —
+// because a full ring always overwrites something. At 1080p30 that was ~27 log
+// lines a second describing normal operation, and the number in them looked
+// like a mounting incident. These three tests pin all of that shut.
+
+/// The number in the event must be **this report's** count, not the running
+/// total. With no throttle each overwrite reports separately, so every delta
+/// must be 1 even as the total climbs.
+#[tokio::test]
+async fn recycling_reports_a_delta_not_the_lifetime_total() {
+    let mut h = harness_recycle(StreamMode::Pull, 2, 8, std::time::Duration::ZERO);
+    // A ring of 2: writes 3, 4 and 5 each displace an occupied slot.
+    feed(&h, 5).await;
+
+    let got = recycles(&mut h.telemetry);
+    assert_eq!(
+        got,
+        vec![(1, 1), (1, 2), (1, 3)],
+        "each report is one overwrite; only the total accumulates.          Reporting the total as the delta would give [(1,1),(2,2),(3,3)]"
+    );
+}
+
+/// A full ring overwrites something on every single frame. The event must not
+/// follow it there — that is the log spam the throttle exists to stop.
+#[tokio::test]
+async fn a_full_ring_does_not_report_once_per_frame() {
+    let mut h = harness_recycle(
+        StreamMode::Pull,
+        2,
+        8,
+        std::time::Duration::from_secs(600),
+    );
+    feed(&h, 12).await;
+
+    let got = recycles(&mut h.telemetry);
+    assert_eq!(
+        got.len(),
+        1,
+        "10 overwrites inside one throttle window must report once, got {got:?}"
+    );
+    assert_eq!(got[0], (1, 1), "and the first recycle reports immediately");
+}
+
+/// The throttle must not lose what it skipped: the next report covers every
+/// overwrite since the previous one, so the count still reconciles.
+#[tokio::test]
+async fn a_throttled_report_accumulates_what_it_skipped() {
+    let mut h = harness_recycle(
+        StreamMode::Pull,
+        2,
+        8,
+        std::time::Duration::from_millis(200),
+    );
+    feed(&h, 3).await; // ring fills, 1 overwrite -> reported immediately
+    feed(&h, 3).await; // 3 more overwrites, still inside the window -> silent
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    feed(&h, 1).await; // window open: this overwrite carries the skipped ones
+
+    let got = recycles(&mut h.telemetry);
+    assert_eq!(got.len(), 2, "one report per window, got {got:?}");
+    assert_eq!(got[0], (1, 1));
+    assert_eq!(
+        got[1],
+        (4, 5),
+        "the second report must cover the three overwrites the throttle skipped plus the one that triggered it, and the total must reconcile"
+    );
 }
 
 fn drain(rx: &mut broadcast::Receiver<TelemetryEnvelope>) -> Vec<TelemetryEvent> {

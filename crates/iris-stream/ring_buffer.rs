@@ -59,7 +59,7 @@ pub struct RingBuffer {
     slots: Vec<RingSlot>,
     write_idx: usize,
     total_written: u64,
-    overflow_count: u64,
+    overwrite_count: u64,
 }
 
 impl RingBuffer {
@@ -71,7 +71,7 @@ impl RingBuffer {
             slots: vec![RingSlot::default(); capacity],
             write_idx: 0,
             total_written: 0,
-            overflow_count: 0,
+            overwrite_count: 0,
         }
     }
 
@@ -80,7 +80,7 @@ impl RingBuffer {
         let capacity = self.slots.len();
         let slot = &mut self.slots[self.write_idx];
         if !slot.is_empty() {
-            self.overflow_count += 1;
+            self.overwrite_count += 1;
         }
         slot.sequence = frame.sequence;
         slot.data.clear();
@@ -143,8 +143,8 @@ impl RingBuffer {
     }
 
     /// How many frames have been overwritten before anyone read them.
-    pub fn overflow_count(&self) -> u64 {
-        self.overflow_count
+    pub fn overwrite_count(&self) -> u64 {
+        self.overwrite_count
     }
 
     pub fn total_written(&self) -> u64 {

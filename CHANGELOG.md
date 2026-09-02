@@ -13,6 +13,31 @@ the upgrade, so a published build would never reach anyone who already had one.
 `build_deb.sh` now refuses to build when the package version and the `iris-ui`
 crate version disagree.
 
+0.2.2 — 2026-09-01
+------------------
+`RingBufferOverflow` told three lies at once, and is now `RingBufferRecycled`
+- **The number was the lifetime total in a field called `dropped_frames`.** It
+  reported `overflow_count`, a monotonic counter, so `dropped_frames: 164` read
+  as "164 frames were just lost" when it meant "this is the 164th overwrite" —
+  reached in about six seconds on an 8-slot ring at 30fps. It now reports
+  `overwritten` (the delta since the previous report) alongside
+  `total_overwritten`.
+- **It fired on every frame.** Once a ring is full it overwrites something on
+  every write, so the event followed the frame rate — roughly 27 telemetry
+  events a second at 1080p30, each a line in the UI log, all describing normal
+  operation. Reports are now throttled to one per second, with the first
+  recycle reported immediately so the moment a ring starts wrapping is still
+  visible.
+- **"Dropped" was the wrong word.** A pull consumer asks for the newest frame,
+  so recycling an older one costs nobody anything; the ring is deliberately
+  lossy. What is diagnostic is the *rate*, which is what a delta over a known
+  interval gives you. `RingBuffer::overflow_count` is `overwrite_count` and
+  `StreamStats::ring_buffer_overflows` is `ring_buffer_overwrites` to match.
+- **The write path took the ring lock three times per frame** — read the count,
+  release, write, release, read it back — so a second writer could interleave
+  and make the difference wrong. It is now one acquisition covering the write
+  and the read.
+
 0.2.1 — 2026-09-01
 ------------------
 Round 5 — the agent could not see on Windows

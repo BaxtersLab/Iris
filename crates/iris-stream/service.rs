@@ -10,7 +10,15 @@ use iris_capture::frame::CaptureFrame;
 use iris_core::error::{IrisError, IrisResult};
 use iris_ipc::telemetry::{TelemetryEnvelope, TelemetryEvent};
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, oneshot};
+
+/// How often `RingBufferRecycled` may be emitted.
+///
+/// One second: fast enough that a ring churning hard is visible within a
+/// glance at the log, slow enough that normal running does not bury every
+/// other telemetry event under it.
+const DEFAULT_RECYCLE_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Requests to the stream service.
 #[derive(Debug)]
@@ -38,7 +46,9 @@ pub struct StreamStats {
     pub frames_dropped: u64,
     pub subscriber_count: usize,
     pub ring_buffer_usage: f32,
-    pub ring_buffer_overflows: u64,
+    /// Frames the ring has overwritten since the service started.
+    /// Normal and unbounded in steady state — see `RingBufferRecycled`.
+    pub ring_buffer_overwrites: u64,
     pub mode: StreamMode,
     pub subscribers: Vec<SubscriberStats>,
 }
@@ -60,6 +70,19 @@ pub struct StreamService {
     /// help a consumer that is persistently slow, it just delays the frames it
     /// eventually gets and hides the problem from the drop counter.
     subscriber_queue_depth: usize,
+    /// Total overwrites already accounted for in a `RingBufferRecycled` event,
+    /// so the next one can report a **delta** rather than the lifetime total.
+    overwrites_reported: u64,
+    /// When the last `RingBufferRecycled` went out. `None` until the first.
+    last_recycle_report: Option<Instant>,
+    /// Minimum gap between `RingBufferRecycled` events.
+    ///
+    /// Without this the event fires on **every frame** once the ring is full,
+    /// because a full ring overwrites something every time — roughly 27 events
+    /// a second at 1080p30, each one a line in the UI's telemetry log. The
+    /// recycling rate is worth knowing; it is not worth knowing 27 times a
+    /// second.
+    recycle_report_interval: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -76,6 +99,31 @@ impl StreamService {
         mode: StreamMode,
         ring_buffer_capacity: usize,
         max_subscribers: usize,
+    ) -> (Self, StreamHandle) {
+        Self::with_recycle_interval(
+            frame_rx,
+            telemetry_tx,
+            mode,
+            ring_buffer_capacity,
+            max_subscribers,
+            DEFAULT_RECYCLE_REPORT_INTERVAL,
+        )
+    }
+
+    /// `new`, with the recycle-report throttle passed in.
+    ///
+    /// Split out **for the tests**, which need to observe both sides of the
+    /// throttle without spending a real second per assertion: `Duration::ZERO`
+    /// makes every overwrite report (proving the delta), and a long interval
+    /// makes only the first report (proving the throttle). `new` is the one
+    /// caller that uses the production interval.
+    pub(crate) fn with_recycle_interval(
+        frame_rx: mpsc::Receiver<CaptureFrame>,
+        telemetry_tx: broadcast::Sender<TelemetryEnvelope>,
+        mode: StreamMode,
+        ring_buffer_capacity: usize,
+        max_subscribers: usize,
+        recycle_report_interval: Duration,
     ) -> (Self, StreamHandle) {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let ring_buffer = shared_ring_buffer(ring_buffer_capacity.max(2));
@@ -97,8 +145,49 @@ impl StreamService {
             total_dropped: 0,
             max_subscribers,
             subscriber_queue_depth: 4,
+            overwrites_reported: 0,
+            last_recycle_report: None,
+            recycle_report_interval,
         };
         (svc, handle)
+    }
+
+    /// Report ring recycling as a throttled **delta**.
+    ///
+    /// This replaces a per-frame emit of the lifetime total, which was wrong in
+    /// three ways at once. The field was called `dropped_frames` and carried
+    /// every overwrite since process start, so `164` read as "164 frames were
+    /// just lost" when it meant "this is the 164th overwrite" — reached in
+    /// about six seconds on an 8-slot ring at 30fps. It fired on every frame
+    /// once the ring filled, because a full ring always overwrites something,
+    /// so it was ~27 log lines a second describing normal operation. And
+    /// "dropped" was the wrong word: a pull consumer asks for the newest frame,
+    /// so recycling an older one costs nobody anything.
+    ///
+    /// What is actually diagnostic is the **rate**, which is what a delta over
+    /// a known interval gives you.
+    fn report_recycled(&mut self, total: u64) {
+        if total <= self.overwrites_reported {
+            return; // the ring has not wrapped since the last report
+        }
+        let now = Instant::now();
+        let due = match self.last_recycle_report {
+            // Report the first recycle immediately: the moment a ring starts
+            // wrapping is the interesting one, and waiting a full interval to
+            // mention it would hide it inside the steady state that follows.
+            None => true,
+            Some(last) => now.duration_since(last) >= self.recycle_report_interval,
+        };
+        if !due {
+            return;
+        }
+        let overwritten = total - self.overwrites_reported;
+        self.overwrites_reported = total;
+        self.last_recycle_report = Some(now);
+        self.emit(TelemetryEvent::RingBufferRecycled {
+            overwritten,
+            total_overwritten: total,
+        });
     }
 
     fn emit(&mut self, event: TelemetryEvent) {
@@ -112,8 +201,8 @@ impl StreamService {
     }
 
     fn stats(&self) -> StreamStats {
-        let (usage, overflows) = match self.ring_buffer.lock() {
-            Ok(rb) => (rb.usage(), rb.overflow_count()),
+        let (usage, overwrites) = match self.ring_buffer.lock() {
+            Ok(rb) => (rb.usage(), rb.overwrite_count()),
             Err(_) => (0.0, 0),
         };
         StreamStats {
@@ -122,7 +211,7 @@ impl StreamService {
             frames_dropped: self.total_dropped,
             subscriber_count: self.subscribers.len(),
             ring_buffer_usage: usage,
-            ring_buffer_overflows: overflows,
+            ring_buffer_overwrites: overwrites,
             mode: self.mode,
             subscribers: self.subscribers.iter().map(|s| s.stats()).collect(),
         }
@@ -142,19 +231,25 @@ impl StreamService {
         //
         // The cost is one copy per frame into a fixed ring, which is bounded
         // and small beside the fan-out it sits next to.
-        let before = self.ring_buffer.lock().map(|r| r.overflow_count()).unwrap_or(0);
-        if let Ok(mut rb) = self.ring_buffer.lock() {
-            rb.write(&frame);
-        }
-        let after = self
-            .ring_buffer
-            .lock()
-            .map(|r| r.overflow_count())
-            .unwrap_or(before);
-        if after > before {
-            self.emit(TelemetryEvent::RingBufferOverflow {
-                dropped_frames: after,
-            });
+        //
+        // One lock acquisition, not three. The previous version took the lock to
+        // read the count, released it to write, and took it a third time to read
+        // the count back — so another writer could interleave and make the
+        // difference wrong. Reading the count inside the same critical section
+        // as the write is both correct and a third of the lock traffic.
+        let total_overwritten = match self.ring_buffer.lock() {
+            Ok(mut rb) => {
+                rb.write(&frame);
+                Some(rb.overwrite_count())
+            }
+            // A poisoned lock means some other thread panicked mid-write. The
+            // frame is not stored and nothing is reported, which is the same
+            // thing the previous version did — surfacing it belongs to whatever
+            // owns the poisoning, not to the per-frame path.
+            Err(_) => None,
+        };
+        if let Some(total) = total_overwritten {
+            self.report_recycled(total);
         }
 
         match self.mode {
