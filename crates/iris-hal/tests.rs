@@ -229,6 +229,216 @@ mod tests {
                 "inconsistent frame sizes: {sizes:?}");
     }
 
+    // ---- format negotiation, the platform-independent half -----------------
+    //
+    // Contributed by the Windows box in round 7 and hoisted onto `FormatRequest`
+    // during integration, so both backends share one implementation and these
+    // two run everywhere.
+
+    /// The decision `mode_satisfies` encodes is "exact match or nothing", and
+    /// that is a choice rather than an accident — so it is pinned here.
+    ///
+    /// Media Foundation does not clamp. Where V4L2 hands back the nearest
+    /// supported mode with a success code, MF takes a media type we picked, so
+    /// a near-miss is ours to accept or refuse. Refusing is what keeps a
+    /// caller able to notice; accepting silently is how this knob died.
+    // No `cfg` gate: as of the round-7 integration these live on
+    // `FormatRequest` in `device.rs`, so the decision is platform-independent
+    // and is now checked on **both** platforms rather than only the one that
+    // happened to implement it second.
+    #[test]
+    fn a_mode_satisfies_only_an_exact_request() {
+        use crate::device::{FormatRequest, PixelFormat};
+        let req = FormatRequest {
+            width: 640,
+            height: 480,
+            pixel_format: PixelFormat::Yuyv,
+        };
+        assert!(req.is_satisfied_by(640, 480, &PixelFormat::Yuyv));
+        // Each of the three fields alone must be enough to refuse.
+        assert!(!req.is_satisfied_by(640, 480, &PixelFormat::Nv12), "format ignored");
+        assert!(!req.is_satisfied_by(1920, 480, &PixelFormat::Yuyv), "width ignored");
+        assert!(!req.is_satisfied_by(640, 1080, &PixelFormat::Yuyv), "height ignored");
+        // And "close" is still no. 4:3 at a different scale is the shape of
+        // near-miss a "nearest mode" search would happily return.
+        assert!(!req.is_satisfied_by(320, 240, &PixelFormat::Yuyv), "nearest accepted");
+    }
+
+    /// A granted mode must produce no message and a refused one must name both
+    /// sides. "Not available" without saying what *is* running leaves a caller
+    /// unable to tell whether anything is.
+    #[test]
+    fn a_mismatch_names_both_what_was_asked_and_what_is_running() {
+        use crate::device::{FormatRequest, PixelFormat};
+        let req = FormatRequest {
+            width: 640,
+            height: 480,
+            pixel_format: PixelFormat::Yuyv,
+        };
+        assert!(
+            req.describe_mismatch(640, 480, &PixelFormat::Yuyv).is_none(),
+            "a granted request must be silent"
+        );
+        let msg = req.describe_mismatch(1920, 1080, &PixelFormat::Nv12)
+            .expect("a refused request must say so");
+        for needle in ["640x480", "YUYV", "1920x1080", "NV12"] {
+            assert!(msg.contains(needle), "message must contain {needle}: {msg}");
+        }
+
+        // The real case measured on the Linux box before negotiation existed:
+        // the shipped default config asked for 4K NV12 and the camera delivered
+        // 1080p MJPEG, silently. Kept as a scenario because it is the concrete
+        // failure this whole thread began with.
+        let default_cfg = FormatRequest {
+            width: 3840,
+            height: 2160,
+            pixel_format: PixelFormat::Nv12,
+        };
+        assert!(
+            default_cfg.describe_mismatch(3840, 2160, &PixelFormat::Nv12).is_none(),
+            "an exact grant must be silent"
+        );
+        let msg = default_cfg
+            .describe_mismatch(1920, 1080, &PixelFormat::Mjpeg)
+            .expect("a clamped mode must be reported");
+        for needle in ["3840x2160", "1920x1080", "MJPEG"] {
+            assert!(msg.contains(needle), "message must contain {needle}: {msg}");
+        }
+    }
+
+    /// Hardware: request two *different* advertised modes in turn and confirm
+    /// the device follows. The Windows mirror of
+    /// `v4l2_negotiates_between_two_advertised_modes`.
+    ///
+    /// **It asserts a transition, not a single match.** Round 7's brief warned
+    /// that a device retains the last mode set on it, and that a
+    /// single-request test passed on Linux with negotiation *deliberately
+    /// disabled* because an earlier run had already left the camera in the
+    /// requested mode. Broken negotiation cannot produce two different formats
+    /// from two different requests, so the comparison between them is the real
+    /// check and the individual assertions are only the diagnosis.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn wmf_negotiates_between_two_advertised_modes() {
+        if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
+            eprintln!("skipping wmf_negotiates_between_two_advertised_modes (set IRIS_USE_HW=1)");
+            return;
+        }
+        use crate::backend::UvcBackend as _;
+        use crate::device::FormatRequest;
+
+        let backend = crate::backend::new_wmf_backend().expect("WmfBackend::new() failed");
+        let devs = backend.enumerate_devices().await.expect("enumerate failed");
+        assert!(!devs.is_empty(), "no camera found");
+        let id = &devs[0].id;
+        let caps = backend.probe_capabilities(id).await.expect("probe failed");
+        assert!(
+            caps.formats.len() >= 2,
+            "need two advertised modes to prove a transition, got {}",
+            caps.formats.len()
+        );
+
+        let small = caps.formats.iter().min_by_key(|f| f.width * f.height).cloned().unwrap();
+        let large = caps.formats.iter().max_by_key(|f| f.width * f.height).cloned().unwrap();
+        assert_ne!(
+            (small.width, small.height),
+            (large.width, large.height),
+            "the two chosen modes must differ or the transition proves nothing"
+        );
+
+        async fn ask(
+            backend: &crate::backend::WmfBackend,
+            id: &crate::device::DeviceId,
+            want: &crate::device::FormatDescriptor,
+        ) -> (u32, u32, crate::device::PixelFormat) {
+            let req = FormatRequest {
+                width: want.width,
+                height: want.height,
+                pixel_format: want.pixel_format.clone(),
+            };
+            backend.open_device(id, Some(&req)).await.expect("open failed");
+            let got = backend
+                .current_format(id)
+                .await
+                .expect("current_format failed")
+                .expect("no current format");
+            backend.close_device(id).await.expect("close failed");
+            eprintln!(
+                "requested {}x{} {} -> granted {}x{} {}",
+                want.width, want.height, want.pixel_format,
+                got.width, got.height, got.pixel_format
+            );
+            (got.width, got.height, got.pixel_format)
+        }
+
+        // Largest first, then smallest: whatever mode a previous run left the
+        // camera in, at least one of these two is a real change.
+        let got_large = ask(&backend, id, &large).await;
+        let got_small = ask(&backend, id, &small).await;
+
+        assert_ne!(
+            got_large, got_small,
+            "both requests returned the same mode — the request is not reaching Media Foundation"
+        );
+        assert_eq!(
+            got_large,
+            (large.width, large.height, large.pixel_format.clone()),
+            "the large mode was advertised and requested but not granted"
+        );
+        assert_eq!(
+            got_small,
+            (small.width, small.height, small.pixel_format.clone()),
+            "the small mode was advertised and requested but not granted"
+        );
+    }
+
+    /// An unsupported request must leave a *working* camera, not a broken one.
+    ///
+    /// The fallback is the reason negotiation cannot make things worse than
+    /// before it existed: no native mode matches, so MF's default is kept and
+    /// the caller is warned. A camera that refused to open on a bad config
+    /// would be a regression introduced by the feature meant to help.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn wmf_an_impossible_request_falls_back_to_a_working_camera() {
+        if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
+            eprintln!("skipping wmf_an_impossible_request_falls_back (set IRIS_USE_HW=1)");
+            return;
+        }
+        use crate::backend::UvcBackend as _;
+        use crate::device::{FormatRequest, PixelFormat};
+
+        let backend = crate::backend::new_wmf_backend().expect("WmfBackend::new() failed");
+        let devs = backend.enumerate_devices().await.expect("enumerate failed");
+        assert!(!devs.is_empty(), "no camera found");
+        let id = &devs[0].id;
+
+        // A resolution no webcam advertises.
+        let req = FormatRequest {
+            width: 12345,
+            height: 6789,
+            pixel_format: PixelFormat::Yuyv,
+        };
+        backend
+            .open_device(id, Some(&req))
+            .await
+            .expect("an unsupported request must not fail the open");
+        let got = backend
+            .current_format(id)
+            .await
+            .expect("current_format failed")
+            .expect("no current format");
+        eprintln!("impossible request -> fell back to {}x{} {}", got.width, got.height, got.pixel_format);
+        assert_ne!(
+            (got.width, got.height),
+            (req.width, req.height),
+            "the device cannot actually be in a mode it does not advertise"
+        );
+        let frame = backend.read_frame(id).await.expect("camera must still deliver frames");
+        assert!(!frame.is_empty(), "fallback left the camera not producing frames");
+        backend.close_device(id).await.expect("close failed");
+    }
+
     // ---- V4L2 backend (Linux mirror of the WMF tests) ----------------------
 
     /// Hardware: request two *different* advertised modes in turn and confirm
@@ -394,42 +604,6 @@ mod tests {
             fmt.pix.pixelformat,
             pixel_format_to_fourcc(&PixelFormat::Yuyv),
             "the requested pixel format must be written, not the adopted one"
-        );
-    }
-
-    /// `VIDIOC_S_FMT` **clamps and still returns success**, so a granted mode
-    /// that differs from the request is the normal case, not an error — and the
-    /// only way anyone finds out is if it is compared and said out loud.
-    #[cfg(target_os = "linux")] // these exercise the V4L2 module, which does not exist on Windows
-    #[test]
-    fn a_granted_mode_that_differs_from_the_request_is_described() {
-        use crate::device::{FormatRequest, PixelFormat};
-        use crate::v4l2_backend::v4l2::V4l2UvcBackend;
-        let req = FormatRequest {
-            width: 3840,
-            height: 2160,
-            pixel_format: PixelFormat::Nv12,
-        };
-
-        // Exactly what was asked for: nothing to report.
-        assert_eq!(
-            V4l2UvcBackend::describe_mismatch(&req, 3840, 2160, &PixelFormat::Nv12),
-            None,
-            "an exact grant must not be reported as a mismatch"
-        );
-
-        // The real case from this box: asked 4K NV12, got 1080p MJPEG.
-        let diff = V4l2UvcBackend::describe_mismatch(&req, 1920, 1080, &PixelFormat::Mjpeg)
-            .expect("a clamped mode must be reported");
-        assert!(diff.contains("3840x2160"), "must name what was asked: {diff}");
-        assert!(diff.contains("1920x1080"), "must name what was granted: {diff}");
-        assert!(diff.contains("MJPEG"), "must name the granted format: {diff}");
-
-        // Format alone differing is still a mismatch — size matching is not
-        // enough, and this is the case a size-only check would miss.
-        assert!(
-            V4l2UvcBackend::describe_mismatch(&req, 3840, 2160, &PixelFormat::Yuyv).is_some(),
-            "a format-only difference must still be reported"
         );
     }
 

@@ -13,6 +13,34 @@ the upgrade, so a published build would never reach anyone who already had one.
 `build_deb.sh` now refuses to build when the package version and the `iris-ui`
 crate version disagree.
 
+0.2.4 — 2026-09-02
+------------------
+Windows negotiates too, and both backends now share one decision
+- **The WMF backend negotiates** (round 7, built on the Windows box). It walks
+  `GetNativeMediaType` for a mode satisfying the request, sets it, and reads back
+  what it got. **Media Foundation does not clamp** — unlike `VIDIOC_S_FMT`, which
+  substitutes the nearest mode and returns success — so "no match" is a real
+  outcome, and it keeps MF's default with a warning naming both the request and
+  what is actually running. Never a silent nearest-match.
+- **The shipped default config is the case this catches.** `3840x2160 nv12` is
+  not advertised by the test camera, so an out-of-the-box Windows Iris now warns
+  twice and keeps 1080p instead of quietly running at a resolution nobody asked
+  for.
+- **The MJPG subtype is mapped**, so that camera enumerates **17** native modes
+  rather than 9. Cosmetic before negotiation existed; not after, because
+  negotiation can only request a mode Iris can see. Confirmed genuinely MJPEG by
+  per-frame sizes that vary (146 346 / 146 322 / 146 298 bytes) — a fixed-size
+  format cannot do that.
+- **`mode_satisfies` and `describe_mismatch` are hoisted onto `FormatRequest`.**
+  They had been written twice, once per backend, with near-identical bodies; the
+  Windows box flagged the duplication and left it to the side that can build
+  both. The two pure tests lost their `cfg(windows)` gate with it and now run
+  everywhere, and one Linux-gated test that had become redundant was folded into
+  the survivor rather than kept as a near-duplicate.
+- **Still not negotiated: `capture.target_fps`**, on either platform — found by
+  the Windows box while implementing the above. Same defect shape as this fix and
+  the one before it, one field over.
+
 0.2.3 — 2026-09-02
 ------------------
 Capture format is negotiated on Linux — the config knob was decorative

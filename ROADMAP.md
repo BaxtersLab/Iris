@@ -342,41 +342,53 @@ contribute **zero tests** — a question a green workspace total cannot answer.
       real 640x480 JPEG **through the YUYV decode arm** — the arm added
       2026-09-01 that had been correct, tested and unreachable until now.
 
-- [ ] **STILL OPEN (Windows) — `capture.pixel_format`, `capture.width` and
-      `capture.height` are ignored by the WMF backend.** The 2026-08-31 item below is not wrong about what it fixed — it
-      routed the config into `CaptureConfig` — but its proof was measured against
-      the one backend that reads those fields, so the fix was never true for
-      hardware.
+- [x] **WINDOWS DONE 2026-09-02 (round 7) — the WMF backend negotiates too.**
+      `open_device` walks `GetNativeMediaType` for a mode satisfying the request,
+      calls `SetCurrentMediaType`, then `GetCurrentMediaType` to read back what it
+      got. **No silent nearest-match**: no match, or a failed set, keeps MF's
+      default and warns, naming both the request and what is running instead.
 
-      `WmfBackend::open_device` never calls `SetCurrentMediaType` — `grep` returns
-      nothing — so it accepts whatever media type Media Foundation defaults to.
-      It now **says so** when handed a request rather than dropping it silently,
-      which is the declaration Article VII asks for, not a fix.
+      **Media Foundation does not clamp** — the one thing that does not port from
+      V4L2, where `S_FMT` substitutes the nearest mode and still returns success.
+      On Windows the choice is Iris's, so "no match" is a real outcome.
 
-      Implementing it needs a Windows box: a search over the native media types
-      for the requested one, a defined fallback when it is absent, and
-      `current_width`/`current_height` kept in step with the result. **Sent as
-      round 7.**
+      Proven on hardware: `iris.toml` with `pixel_format = "yuy2"` gives
+      `granted 640x480 YUYV as requested` and `/frame` 200 through the YUYV arm,
+      **with no instrumentation** — the same line Linux prints from the same
+      config. The shipped default config (`3840x2160 nv12`, not advertised by
+      that camera) now produces two warnings and keeps 1080p NV12 instead of
+      silently running at a resolution nobody asked for.
 
-      **Measured on Linux, 2026-09-02, no config file:**
-      ```
-      Capture config: 3840x2160 @30 fps format=nv12     <- what Iris asked for
-      UvcCaptureBackend: device mode 1920x1080 MJPEG    <- what it got
-      FrameCaptured { width: 1920, height: 1080 }
-      ```
-      Neither the resolution nor the format survived. Found on Windows in round 6
-      (§4.2) and confirmed identical here — it is estate-wide, not a Windows gap.
+      Windows gate **192 passed, 0 failed, 0 warnings** (188 baseline, prediction
+      met exactly). `mode_satisfies` and `describe_mismatch` were hoisted onto
+      `FormatRequest` in `device.rs` during integration, so both backends share
+      one implementation and the two pure tests now run on both platforms.
 
-      **Consequences.** `validate()` accepts `pixel_format = "yuy2"` (there is a
-      test for it) and the value is then discarded, so the config accepts a request
-      it cannot honour — Article VII: a declared knob that does nothing. The YUYV
-      decode arm added 2026-09-01 is consequently **unreachable at runtime** on
-      Windows, correct and dead, until a camera turns up whose *default* mode is
-      YUY2 — at which point it silently becomes load-bearing. And every resolution
-      `probe_capabilities` enumerates is unselectable.
+      **What this closes, for the record.** `validate()` accepted
+      `pixel_format = "yuy2"` and the value was then discarded — Article VII, a
+      declared knob that does nothing — and the YUYV decode arm added 2026-09-01
+      was correct, tested and unreachable at runtime. Both are now real.
 
-      Until then the YUYV arm stays unreachable at runtime on Windows, and every
-      resolution `probe_capabilities` enumerates there is unselectable.
+- [x] **The MJPG subtype is mapped (round 7).** That camera enumerates **17**
+      native modes rather than 9, and MJPEG is selectable and works through
+      `/frame` — verified by frame sizes that vary per frame (146 346 / 146 322 /
+      146 298 bytes), which a fixed-size format cannot do. It stopped being
+      cosmetic the moment negotiation existed, because **negotiation can only
+      request a mode Iris can see.**
+
+- [ ] **`capture.target_fps` is still honoured by the mock backend alone** —
+      found by the Windows box in round 7, confirmed here. `FormatRequest` is
+      `{width, height, pixel_format}`; the field reaches nothing but the mock's
+      own sleep (`iris-capture/src/backend.rs:81`), and there is no
+      `VIDIOC_S_PARM` anywhere in the V4L2 path. **This is the third instance of
+      the same defect shape** — a config knob validated, passed down, and
+      silently ignored by every real backend. The information is present on both
+      sides: MF media types carry `MF_MT_FRAME_RATE`, and `probe_capabilities`
+      already reads it into `FormatDescriptor::fps`. It is also why
+      `is_satisfied_by` ignores fps: a device offering one resolution at two
+      frame rates gets whichever the walk reaches first, with no way to ask for
+      the other.
+
 
 - [ ] **REOPENED — the closure method, not just the item.** The 2026-08-31 proof
       cites `size_bytes` of `460800` (640x480x1.5, NV12) and `614400` (x2, YUY2).

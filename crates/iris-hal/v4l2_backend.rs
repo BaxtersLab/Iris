@@ -390,29 +390,6 @@ pub mod v4l2 {
             fmt.pix.pixelformat = pixel_format_to_fourcc(&req.pixel_format);
         }
 
-        /// Did the driver grant what was asked for?
-        ///
-        /// Returns `None` when it did, or a description of the difference when
-        /// it did not. `VIDIOC_S_FMT` **clamps rather than fails** — ask a 1080p
-        /// camera for 4K and it returns 1080p with a success code — so the only
-        /// way to know is to compare, and the only honest thing to do with a
-        /// difference is say it out loud.
-        pub(crate) fn describe_mismatch(
-            req: &FormatRequest,
-            granted_w: u32,
-            granted_h: u32,
-            granted_fmt: &PixelFormat,
-        ) -> Option<String> {
-            if req.width == granted_w && req.height == granted_h && req.pixel_format == *granted_fmt
-            {
-                return None;
-            }
-            Some(format!(
-                "requested {}x{} {} but the driver granted {}x{} {}",
-                req.width, req.height, req.pixel_format, granted_w, granted_h, granted_fmt
-            ))
-        }
-
         /// Open the node, negotiate a format, map buffers, start streaming.
         fn open_sync(id: &DeviceId, requested: Option<&FormatRequest>) -> HalResult<OpenDevice> {
             let fd = open_node(&id.0).ok_or(HalError::DeviceNotFound)?;
@@ -487,7 +464,7 @@ pub mod v4l2 {
             // is indistinguishable from success, and a clamped mode is exactly
             // the case a caller most needs to know about.
             if let Some(req) = requested {
-                match Self::describe_mismatch(req, granted.width, granted.height, &pixel_format) {
+                match req.describe_mismatch(granted.width, granted.height, &pixel_format) {
                     Some(diff) => tracing::warn!("format negotiation: {diff}"),
                     None => tracing::info!(
                         "format negotiation: granted {}x{} {} as requested",

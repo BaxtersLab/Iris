@@ -189,6 +189,7 @@ mod wmf {
     // Well-known subtype GUIDs
     const MF_VIDEO_FORMAT_NV12: GUID = GUID::from_u128(0x3231564e_0000_0010_8000_00aa00389b71);
     const MF_VIDEO_FORMAT_YUY2: GUID = GUID::from_u128(0x32595559_0000_0010_8000_00aa00389b71);
+    const MF_VIDEO_FORMAT_MJPG: GUID = GUID::from_u128(0x47504a4d_0000_0010_8000_00aa00389b71);
     const MF_VIDEO_FORMAT_RGB24: GUID = GUID::from_u128(0x00000014_0000_0010_8000_00aa00389b71);
     const MF_VIDEO_FORMAT_RGB32: GUID = GUID::from_u128(0x00000016_0000_0010_8000_00aa00389b71);
 
@@ -203,6 +204,19 @@ mod wmf {
             Some(PixelFormat::Rgb24)
         } else if *guid == MF_VIDEO_FORMAT_RGB32 {
             Some(PixelFormat::Bgr24)
+        } else if *guid == MF_VIDEO_FORMAT_MJPG {
+            // Mapped as of round 7. Before that, this camera's 8 MJPG native
+            // modes returned `None` here, `media_type_to_format` dropped them,
+            // and 17 native modes enumerated as 9. That was cosmetic while
+            // nothing could select a mode; with negotiation it is not —
+            // **negotiation can only request a mode Iris can see**, so an
+            // unmapped format makes half this device's modes unrequestable.
+            //
+            // Safe to hand onward: `snapshot.rs` decodes `Mjpeg`, the preview's
+            // `frame_to_rgba` has an `Mjpeg` arm, and `expected_size` already
+            // returns 0 for it meaning "not predictable", which is the right
+            // contract for a compressed frame of varying length.
+            Some(PixelFormat::Mjpeg)
         } else {
             None
         }
@@ -496,31 +510,36 @@ mod wmf {
             .map_err(|e| HalError::Io(format!("spawn_blocking: {e}")))?
         }
 
-        /// **Format negotiation is not implemented on Windows.** This path never
-        /// calls `SetCurrentMediaType`; it accepts whatever media type Media
-        /// Foundation defaults to. A request is therefore accepted and **not**
-        /// honoured, and that is said out loud rather than dropped silently —
-        /// the silent version is what hid this for months.
+        /// Open the device, negotiating the requested format.
         ///
-        /// Implementing it needs a Windows box: a search over the native media
-        /// types for the requested one, a defined fallback when it is absent,
-        /// and `current_width`/`current_height` kept in step with the result.
-        /// Declared in `ROADMAP.md` under the round-6 Windows findings.
+        /// **Media Foundation does not clamp**, which is the one way this
+        /// differs from the V4L2 side. `VIDIOC_S_FMT` substitutes the nearest
+        /// supported mode and returns success; `SetCurrentMediaType` takes a
+        /// media type the caller picked. So this searches the native types for
+        /// an exact match, sets it, and reads back what it got:
+        ///
+        /// 1. walk `GetNativeMediaType` for a mode satisfying the request;
+        /// 2. `SetCurrentMediaType` with it;
+        /// 3. `GetCurrentMediaType` — requesting is not receiving;
+        /// 4. `info` when the request was granted, `warn` when it was not;
+        /// 5. **no match, or a failed set → keep MF's default and warn**, naming
+        ///    both the request and what is running instead.
+        ///
+        /// Never a silent "nearest" substitution. A caller that asked for
+        /// 640x480 YUY2, got 1920x1080 NV12 and was not told cannot notice —
+        /// which is how `capture.pixel_format` came to be honoured by the mock
+        /// backend alone on both platforms until 2026-09-02.
+        ///
+        /// `current_width`/`current_height`/`current_format` are set from the
+        /// read-back, so telemetry reports what is delivered rather than what
+        /// was asked for.
         async fn open_device(
             &self,
             id: &DeviceId,
             requested: Option<&crate::device::FormatRequest>,
         ) -> HalResult<()> {
-            if let Some(req) = requested {
-                tracing::warn!(
-                    "format negotiation is not implemented on Windows: requested {}x{} {} \
-                     will be ignored and the device's default media type used instead",
-                    req.width,
-                    req.height,
-                    req.pixel_format
-                );
-            }
             let dev_id = id.0.clone();
+            let requested = requested.cloned();
 
             // Create reader + detect current format on blocking thread, then
             // move the resulting objects back into our Mutex-protected state.
@@ -546,6 +565,66 @@ mod wmf {
                 let reader: IMFSourceReader = MFCreateSourceReaderFromMediaSource(&source, None)
                     .map_err(|e| HalError::Io(format!("CreateSourceReader: {e}")))?;
 
+                // ASK for the configured mode.
+                //
+                // MF has no clamping negotiation, so this is a search: walk the
+                // native types, take the first that satisfies the request
+                // exactly, and set it. Anything not found is reported, never
+                // approximated — see `mode_satisfies`.
+                //
+                // A failure anywhere here falls back to the device's default
+                // rather than propagating, for the same reason the V4L2 side
+                // does: asking for something unsupported must not leave a
+                // working camera worse off than before negotiation existed.
+                if let Some(req) = requested.as_ref() {
+                    let mut chosen: Option<(u32, IMFMediaType)> = None;
+                    let mut idx = 0u32;
+                    while let Ok(mt) =
+                        reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, idx)
+                    {
+                        if let Some(fd) = media_type_to_format(&mt) {
+                            if req.is_satisfied_by(fd.width, fd.height, &fd.pixel_format) {
+                                chosen = Some((idx, mt));
+                                break;
+                            }
+                        }
+                        idx += 1;
+                    }
+                    match chosen {
+                        Some((found_at, mt)) => {
+                            if let Err(e) = reader.SetCurrentMediaType(
+                                MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                None,
+                                &mt,
+                            ) {
+                                tracing::warn!(
+                                    "format negotiation: native type {found_at} matched \
+                                     {}x{} {} but SetCurrentMediaType failed ({e}); \
+                                     falling back to the device's default mode",
+                                    req.width,
+                                    req.height,
+                                    req.pixel_format
+                                );
+                            }
+                        }
+                        // Naming what is being used instead matters as much as
+                        // naming what was refused: "not available" alone leaves
+                        // a caller unable to tell whether anything is running.
+                        None => tracing::warn!(
+                            "format negotiation: no native mode matches the requested \
+                             {}x{} {}; using the device's default mode instead. \
+                             Run with the enumeration this device advertises to \
+                             pick a supported one.",
+                            req.width,
+                            req.height,
+                            req.pixel_format
+                        ),
+                    }
+                }
+
+                // Read back what we actually got. Authoritative for telemetry
+                // whether or not anything was requested — requesting is not
+                // receiving.
                 let current_type = reader
                     .GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM)
                     .map_err(|e| HalError::Io(format!("GetCurrentMediaType: {e}")))?;
@@ -556,6 +635,21 @@ mod wmf {
                     fps: 30,
                     pixel_format: PixelFormat::Bgr24,
                 });
+
+                // Say so either way. Silence is indistinguishable from success,
+                // and a mode that was not granted is exactly what a caller most
+                // needs to hear about.
+                if let Some(req) = requested.as_ref() {
+                    match req.describe_mismatch(fd.width, fd.height, &fd.pixel_format) {
+                        Some(diff) => tracing::warn!("format negotiation: {diff}"),
+                        None => tracing::info!(
+                            "format negotiation: granted {}x{} {} as requested",
+                            fd.width,
+                            fd.height,
+                            fd.pixel_format
+                        ),
+                    }
+                }
 
                 Ok::<_, HalError>((SendReader(reader), SendSource(source), fd))
             })

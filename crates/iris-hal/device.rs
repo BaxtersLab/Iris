@@ -43,6 +43,44 @@ pub struct FormatRequest {
     pub pixel_format: PixelFormat,
 }
 
+impl FormatRequest {
+    /// Does a delivered mode satisfy this request **exactly**?
+    ///
+    /// Exactly is the point. Media Foundation does not clamp — it takes the
+    /// media type the caller picked — so on Windows "no match" is a real
+    /// outcome that Iris must resolve itself, and the one thing it must never
+    /// do is substitute a nearest mode silently. A caller that asked for
+    /// 640x480 YUY2, got 1920x1080 NV12 and was not told has no way to notice.
+    /// That is exactly how `capture.pixel_format` came to be honoured by the
+    /// mock backend alone on both platforms until 2026-09-02.
+    ///
+    /// V4L2 reaches the same place by the opposite route: `VIDIOC_S_FMT`
+    /// *does* clamp and still returns success, so a difference there is normal
+    /// and equally silent unless someone compares.
+    pub fn is_satisfied_by(&self, width: u32, height: u32, pixel_format: &PixelFormat) -> bool {
+        self.width == width && self.height == height && self.pixel_format == *pixel_format
+    }
+
+    /// `None` when the request was granted, or a description of the difference.
+    ///
+    /// Names **both** sides on purpose: "not available" without saying what is
+    /// running instead leaves a caller unable to tell whether anything is.
+    pub fn describe_mismatch(
+        &self,
+        width: u32,
+        height: u32,
+        pixel_format: &PixelFormat,
+    ) -> Option<String> {
+        if self.is_satisfied_by(width, height, pixel_format) {
+            return None;
+        }
+        Some(format!(
+            "requested {}x{} {} but the device is delivering {}x{} {}",
+            self.width, self.height, self.pixel_format, width, height, pixel_format
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PixelFormat {
     Rgb24,
