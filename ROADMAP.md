@@ -656,6 +656,30 @@ Iris, with no client library and no second transport.
       * and either way `AGENT_VISION.md` must say plainly that a served frame is
         not a guarantee of visible content.
 
+      **Prompting helps, and is not sufficient — measured, same image, same
+      model.** Given explicit permission to abstain (*"if the image is blank,
+      uniform, or contains no discernible subject, say exactly that"*) it
+      answered **"The image is blank."** — correct. Asked a direct yes/no it
+      answered **"No. The image is completely black..."** — the right verdict
+      with a fabricated detail, since the field is mid-grey (130), not black.
+
+      Three consequences, and they point the same way:
+
+      1. **The naive prompt is the dangerous one.** "Describe what you see" is
+         what anyone writes first, and it is what produced the person, the
+         window and the lamp. The safe phrasing has to be deliberate.
+      2. **Iris does not control the consumer's prompt.** A SOC agent asking its
+         own question gets whatever behaviour its own wording produces, so a
+         prompt convention is a *recommendation*, never a guarantee.
+      3. **The model's own account of a blank frame is unreliable**, so "ask the
+         model whether it can see" cannot be the detector. It called a grey
+         field black while correctly reporting nothing was in it.
+
+      So the guard belongs in **pixel space, in Iris** — the only place that is
+      independent of the consumer's wording and of the model's perception. The
+      prompt convention goes in `AGENT_VISION.md` as defence in depth, not as
+      the mechanism.
+
       Not a hypothetical: the mock backend is reachable today via
       `IRIS_BACKEND=mock`, and until 2026-09-01 it was the **default on both
       platforms** — an agent wired up then would have been reasoning about
