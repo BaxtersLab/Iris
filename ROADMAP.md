@@ -610,6 +610,57 @@ verified removed (`diff -rq` clean, no patch returned).
       which needs no per-format knowledge. The round-6 probe hit this and caught
       it before reporting a phantom defect in the one format that round was about.
 
+## Agent vision — the loop is proven, and it has one dangerous failure mode
+
+**End to end, 2026-09-03, on this box, no new code:** `llama-server` with
+`qwen2.5-omni-3b` + `mmproj-Qwen2.5-VL-3B` on **port 8082 (SOC's A4 vision
+slot)`, Iris `/frame` on 9180, the `data_url` posted straight into
+`/v1/chat/completions` as an `image_url`. The model described the room the
+camera was pointed at — a bookshelf, books, a yellow stuffed toy on the top
+shelf. **23s on CPU, 449 prompt tokens for a 768px frame.**
+
+That is the premise of the whole project demonstrated: an agent can see through
+Iris, with no client library and no second transport.
+
+- [ ] **CRITICAL: a featureless frame produces a confident fabrication, not "I
+      see nothing".** The control run sent the **mock backend's synthetic
+      frame** — verified to be exactly **one colour**, RGB(130,130,130) across
+      all 331 776 pixels — and the same model, same prompt, answered:
+
+      > "The image is a black and white photograph of a person standing in a
+      > room. The person is wearing a white shirt and appears to be looking at
+      > something in the distance. The room has a window with curtains, and
+      > there is a table with a lamp on it."
+
+      A person, a window, curtains and a lamp, in a uniform grey field.
+
+      **This is the failure mode that matters for the stated goal.** "Agentic
+      robotics with reactive programming" means something acts on the answer. A
+      lens cap, a dark room, a disconnected sensor or a mock backend does not
+      yield an abstention — it yields detailed, plausible, entirely invented
+      content, in the same tone as a true description. Nothing downstream can
+      tell the two apart.
+
+      **Iris is the right place to catch it**, because Iris is the only
+      component that sees the pixels before the model does and knows what a
+      frame *should* look like. A near-zero-variance frame is trivially
+      detectable — the control had a distinct-colour count of **1**. Options,
+      in rough order of preference:
+
+      * `/frame` returns **503 with a reason** when the frame carries no
+        information (uniform, or below a variance floor), the same way it
+        already refuses a stale frame — an agent that already handles 503 gets
+        this for free;
+      * or it serves the frame with an explicit `"low_information": true` flag
+        and lets the caller decide;
+      * and either way `AGENT_VISION.md` must say plainly that a served frame is
+        not a guarantee of visible content.
+
+      Not a hypothetical: the mock backend is reachable today via
+      `IRIS_BACKEND=mock`, and until 2026-09-01 it was the **default on both
+      platforms** — an agent wired up then would have been reasoning about
+      furniture that does not exist.
+
 ## Notes on MJPEG support (added 2026-08-01)
 
 `PixelFormat::Mjpeg` was added so V4L2 enumeration reports what the hardware actually offers.
