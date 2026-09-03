@@ -30,6 +30,27 @@ if [ "$VERSION" != "$CRATE_VERSION" ]; then
     exit 1
 fi
 
+# ...and Cargo.lock must agree with them too.
+#
+# Same class of drift, one file over, found by the Windows box in round 8: after
+# a version bump the lockfile still said the OLD version, and cargo **silently
+# corrects it on the first ordinary build**, which is exactly why nobody notices.
+# What does notice is anything passing `--locked`:
+#
+#     cargo metadata --locked   ->  error: cannot update the lock file ...
+#
+# So a CI or reproducible build of a shipped payload fails, and the first build
+# on any machine dirties the tree — a nuisance for the `diff -ruN` workflow the
+# courier drive runs on. Checked here rather than trusted, because the guard
+# above was added for the identical mistake and did not cover this file.
+LOCK_VERSION="$(awk '/^name = "iris-ui"$/{getline; sub(/^version = "/,""); sub(/"$/,""); print; exit}' Cargo.lock)"
+if [ "$LOCK_VERSION" != "$CRATE_VERSION" ]; then
+    echo "FATAL: Cargo.lock says iris-ui $LOCK_VERSION but Cargo.toml says $CRATE_VERSION" >&2
+    echo "       run 'cargo update -p iris-ui --precise $CRATE_VERSION' or any build, then commit Cargo.lock" >&2
+    echo "       (a stale lockfile builds fine and fails every --locked build)" >&2
+    exit 1
+fi
+
 # Honour CARGO_TARGET_DIR, as run.sh does — builds on this box use a space-free
 # target directory outside the tree.
 TARGET_DIR="${CARGO_TARGET_DIR:-$HERE/target}"

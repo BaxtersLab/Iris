@@ -13,6 +13,36 @@ the upgrade, so a published build would never reach anyone who already had one.
 `build_deb.sh` now refuses to build when the package version and the `iris-ui`
 crate version disagree.
 
+0.2.6 — 2026-09-03
+------------------
+Frame rate negotiated on Windows; and a stale lockfile that broke `--locked`
+- **The WMF backend negotiates the frame rate** (round 8, built on the Windows
+  box). On Windows the rate is an attribute of the media type rather than a
+  separate ioctl, so it is a **stricter search** rather than a second call: pass
+  one wants mode *and* rate, pass two settles for the mode and warns, and
+  `fps == 0` reduces to round 7's behaviour. A wrong rate never costs the right
+  resolution.
+- `fps_from_ratio` rounds like its Linux counterpart, but they are **not** the
+  same computation — V4L2's `timeperframe` is an interval, MF's attribute is
+  already a rate. Both doc comments say so, so neither gets "fixed" to match.
+- **`WmfBackend::current_format` returned a hardcoded `fps: 30`.** Telemetry
+  would have reported 30 whatever the camera was doing — the same shape as the
+  config knobs of the last three rounds, pointing the other way.
+- **The hardware suites take a camera lock on both platforms.** The WMF tests
+  were failing 5 runs in 5 at default parallelism (`0xC00D3EA3`, "preempted by
+  another immersive application") — a different error code and the identical
+  defect to Linux's `EBUSY`. Measured on the payload as shipped, so pre-existing.
+- **`build_deb.sh` refuses a stale `Cargo.lock`.** After the 0.2.5 bump the
+  lockfile still said 0.2.4; cargo silently corrects it on the first ordinary
+  build, so it is invisible until something passes `--locked` — and then every
+  CI or reproducible build of that payload fails. Same class as the
+  package-vs-crate version guard that already sat beside it.
+- **Still unproven, and now on three devices:** no camera in this estate
+  advertises more than one frame rate for a single mode, so neither platform can
+  demonstrate that rate negotiation changes anything. The round-8 probe also
+  checked the MIN/MAX range attributes, not just the nominal rate. The logic is
+  proven by construction and unit test; the transition tests exist and skip.
+
 0.2.5 — 2026-09-02
 ------------------
 The third decorative knob: `capture.target_fps` is negotiated on Linux

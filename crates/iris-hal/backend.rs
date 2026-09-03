@@ -195,6 +195,66 @@ mod wmf {
 
     const MF_SOURCE_READER_FIRST_VIDEO_STREAM: u32 = 0xFFFFFFFC;
 
+    /// Frames per second from `MF_MT_FRAME_RATE`, **rounded**.
+    ///
+    /// The attribute is a packed ratio: numerator in the high 32 bits,
+    /// denominator in the low 32. Unlike V4L2, whose `timeperframe` is an
+    /// *interval* (seconds per frame), this one is already a rate — so the
+    /// arithmetic is `num/den` rather than `den/num`, and only the rounding is
+    /// shared with `fps_from_interval`.
+    ///
+    /// **Rounded, not truncated**, and that is the whole point of the helper.
+    /// 30000/1001 is 29.97fps, which every broadcast-derived device reports;
+    /// truncation gives 29, so a correctly granted 30fps request would warn on
+    /// every launch that it got 29. This read used to truncate.
+    pub(crate) fn fps_from_ratio(numerator: u32, denominator: u32) -> Option<u32> {
+        if numerator == 0 || denominator == 0 {
+            return None;
+        }
+        Some((numerator + denominator / 2) / denominator)
+    }
+
+    /// Pick which enumerated native mode to use, and say whether the requested
+    /// **rate** was among the reasons.
+    ///
+    /// Pure, and separated from the COM walk on purpose: this is the whole of
+    /// round 8's new decision, and **it cannot be proven on hardware that
+    /// offers one frame rate.** Every native mode on the reference camera
+    /// advertises 30/1, so a `choose_mode` that ignored the rate entirely would
+    /// behave identically there. The tests below are the only place the
+    /// preference is actually exercised.
+    ///
+    /// Returns `(index, rate_matched)`.
+    ///
+    /// * a mode-and-rate match wins outright and stops the search;
+    /// * otherwise the **first** mode match is kept, but the walk continues —
+    ///   stopping at the first mode match is exactly how the rate would be
+    ///   silently ignored on a camera that does offer a choice;
+    /// * `req.fps == 0` means "do not ask", which reduces this to round 7's
+    ///   mode-only search.
+    ///
+    /// Rate is deliberately **not** part of `is_satisfied_by`: mode selection
+    /// and rate selection are different questions, and a predicate demanding an
+    /// exact rate would find nothing on a camera whose default rate differs.
+    pub(crate) fn choose_mode(
+        req: &crate::device::FormatRequest,
+        candidates: &[(u32, FormatDescriptor)],
+    ) -> Option<(u32, bool)> {
+        let mut mode_only: Option<u32> = None;
+        for (idx, fd) in candidates {
+            if !req.is_satisfied_by(fd.width, fd.height, &fd.pixel_format) {
+                continue;
+            }
+            if req.fps != 0 && fd.fps == req.fps {
+                return Some((*idx, true));
+            }
+            if mode_only.is_none() {
+                mode_only = Some(*idx);
+            }
+        }
+        mode_only.map(|idx| (idx, false))
+    }
+
     fn subtype_to_pixel_format(guid: &GUID) -> Option<PixelFormat> {
         if *guid == MF_VIDEO_FORMAT_NV12 {
             Some(PixelFormat::Nv12)
@@ -233,6 +293,10 @@ mod wmf {
         current_width: u32,
         current_height: u32,
         current_format: PixelFormat,
+        /// The frame rate the device actually granted, read back from
+        /// `MF_MT_FRAME_RATE`. Was hardcoded to 30 in `current_format`, which
+        /// reported a rate nobody had checked.
+        current_fps: u32,
     }
 
     // SAFETY: IMFSourceReader is a COM pointer (NonNull<c_void>). We protect all
@@ -275,6 +339,7 @@ mod wmf {
                     current_width: 0,
                     current_height: 0,
                     current_format: PixelFormat::Bgr24,
+                    current_fps: 0,
                 }),
             })
         }
@@ -356,15 +421,7 @@ mod wmf {
         let fps = mt
             .GetUINT64(&MF_MT_FRAME_RATE)
             .ok()
-            .map(|r| {
-                let num = (r >> 32) as u32;
-                let den = (r & 0xFFFFFFFF) as u32;
-                if den > 0 {
-                    num / den
-                } else {
-                    30
-                }
-            })
+            .and_then(|r| fps_from_ratio((r >> 32) as u32, (r & 0xFFFFFFFF) as u32))
             .unwrap_or(30);
 
         Some(FormatDescriptor {
@@ -577,19 +634,43 @@ mod wmf {
                 // does: asking for something unsupported must not leave a
                 // working camera worse off than before negotiation existed.
                 if let Some(req) = requested.as_ref() {
-                    let mut chosen: Option<(u32, IMFMediaType)> = None;
+                    // Walk once, collecting descriptors, then decide with the
+                    // pure `choose_mode`. Collecting first keeps the decision
+                    // out of the COM loop, which is what makes it testable
+                    // without a camera — and on hardware offering a single
+                    // frame rate that is the only way it can be tested at all.
+                    let mut candidates: Vec<(u32, FormatDescriptor)> = Vec::new();
                     let mut idx = 0u32;
                     while let Ok(mt) =
                         reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, idx)
                     {
                         if let Some(fd) = media_type_to_format(&mt) {
-                            if req.is_satisfied_by(fd.width, fd.height, &fd.pixel_format) {
-                                chosen = Some((idx, mt));
-                                break;
-                            }
+                            candidates.push((idx, fd));
                         }
                         idx += 1;
                     }
+                    let picked = choose_mode(req, &candidates);
+                    if let Some((_, false)) = picked {
+                        if req.fps != 0 {
+                            tracing::warn!(
+                                "format negotiation: {}x{} {} is available but not at {} fps; \
+                                 taking the mode and leaving the rate to the device",
+                                req.width,
+                                req.height,
+                                req.pixel_format,
+                                req.fps
+                            );
+                        }
+                    }
+                    // Re-fetch by index rather than holding the type through the
+                    // decision: `GetNativeMediaType` is cheap and this keeps
+                    // `choose_mode` free of COM entirely.
+                    let chosen = picked.and_then(|(at, _)| {
+                        reader
+                            .GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, at)
+                            .ok()
+                            .map(|mt| (at, mt))
+                    });
                     match chosen {
                         Some((found_at, mt)) => {
                             if let Err(e) = reader.SetCurrentMediaType(
@@ -640,11 +721,15 @@ mod wmf {
                 // and a mode that was not granted is exactly what a caller most
                 // needs to hear about.
                 if let Some(req) = requested.as_ref() {
-                    // `None`: Windows does not negotiate a frame rate yet. Passing a
-                    // rate nobody read would invent mismatches; passing `None`
-                    // says "not asked here" honestly. Round 8 replaces this with
-                    // the rate matched from `MF_MT_FRAME_RATE`.
-                    match req.describe_mismatch(fd.width, fd.height, &fd.pixel_format, None) {
+                    // The granted rate, read back from `MF_MT_FRAME_RATE` on the
+                    // type the device is actually on — round 8 replaced the
+                    // honest `None` that stood here while Windows did not read it.
+                    match req.describe_mismatch(
+                        fd.width,
+                        fd.height,
+                        &fd.pixel_format,
+                        Some(fd.fps),
+                    ) {
                         Some(diff) => tracing::warn!("format negotiation: {diff}"),
                         None => tracing::info!(
                             "format negotiation: granted {}x{} {} as requested",
@@ -667,6 +752,7 @@ mod wmf {
             st.current_width = fd.width;
             st.current_height = fd.height;
             st.current_format = fd.pixel_format;
+            st.current_fps = fd.fps;
             Ok(())
         }
 
@@ -831,7 +917,7 @@ mod wmf {
             Ok(Some(FormatDescriptor {
                 width: st.current_width,
                 height: st.current_height,
-                fps: 30,
+                fps: st.current_fps,
                 pixel_format: st.current_format.clone(),
             }))
         }
@@ -930,6 +1016,14 @@ mod wmf {
 
 #[cfg(windows)]
 pub use wmf::WmfBackend;
+
+/// The pure half of round 8's rate negotiation, exposed for tests. `mod wmf`
+/// is private and the rest of it needs COM; these two are arithmetic and a
+/// selection over a slice. `cfg(test)` as well as `cfg(windows)`, since the
+/// production callers live inside `mod wmf` itself and an ungated re-export is
+/// an unused import in a normal build.
+#[cfg(all(windows, test))]
+pub(crate) use wmf::{choose_mode, fps_from_ratio};
 
 #[cfg(windows)]
 pub fn new_wmf_backend() -> HalResult<WmfBackend> {

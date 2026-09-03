@@ -406,11 +406,73 @@ contribute **zero tests** — a question a green workspace total cannot answer.
       on this hardware rather than being deleted. Proving the request reaches the
       driver needs a camera offering two rates — **sent as round 8.**
 
-- [ ] **Windows: `capture.target_fps` is not negotiated.** `FormatRequest.fps`
-      reaches the WMF backend and is currently ignored; `describe_mismatch` is
-      passed `None` there, which is honest rather than silent. Media types carry
-      `MF_MT_FRAME_RATE` and `probe_capabilities` already reads it, so the
-      information is present. Round 8.
+- [x] **WINDOWS DONE 2026-09-02 (round 8) — the frame rate is negotiated there
+      too.** On Windows the rate is an attribute of the media type rather than a
+      separate ioctl, so it is a **stricter search**, not a second call: pass one
+      wants mode *and* rate, pass two settles for the mode and warns, and
+      `req.fps == 0` skips pass one entirely, reducing to round 7's behaviour.
+      Falling back rather than failing keeps a wrong rate from costing the right
+      resolution.
+
+      `fps_from_ratio` rounds, as `fps_from_interval` does — but note the two are
+      **not** the same computation: V4L2's `timeperframe` is an *interval*
+      (`den/num`) and MF's attribute is already a *rate* (`num/den`). Only the
+      rounding is shared, and both doc comments say so.
+
+      Also fixed there: `WmfBackend::current_format` returned a **hardcoded
+      `fps: 30`**. Had the camera been at any other rate, telemetry would have
+      said 30 regardless — the same shape as the config knobs these rounds have
+      been closing, pointing the other way.
+
+      Live from `iris.toml` alone: `target_fps = 30` gives
+      `granted 640x480 YUYV as requested`; `target_fps = 60` still grants the
+      mode and warns twice, naming the delivered `@30fps`. Windows gate
+      **196 passed, 0 failed, 0 warnings** (194 baseline, prediction exact).
+
+- [ ] **UNPROVEN ESTATE-WIDE: no camera here can demonstrate that frame-rate
+      negotiation does anything.** Both platforms implement it; neither can show
+      it changing a device's behaviour.
+
+      * Linux camera: all 9 modes advertise 30fps.
+      * Windows camera: all **17** native media types advertise `30/1`, and the
+        round-8 probe checked `MF_MT_FRAME_RATE_RANGE_MIN`/`_MAX` as well as the
+        nominal rate — **a camera can express a choice as a range rather than as
+        separate types**, and a probe reading only the nominal would have missed
+        it. Min == max == nominal on all 17.
+      * A third, older camera (`USB\VID_0545&PID_8135`, Xirlink) was plugged in
+        specifically to settle this and **never reaches Media Foundation at
+        all**: device status `Error`, `CM_PROB_FAILED_INSTALL`, no class. It had
+        previously been described as "too old, sends a different format" — it
+        does not send a format, because Windows never installs a driver, so it
+        never becomes a camera. No mapping in `subtype_to_pixel_format` could
+        reach it; only a driver could, and none exists for Win10 x64.
+
+      What would close this is **one device advertising two rates for a single
+      mode**. Until then the preference logic is proven by construction and by
+      unit test — `choose_mode` was extracted as a pure function in round 8
+      precisely because hardware cannot exercise it — and the transition tests on
+      both platforms exist and **skip**, printing what each mode offers so the
+      reason stays visible rather than inferred.
+
+- [x] **The hardware suites take a camera lock on both platforms (round 8).**
+      The WMF tests were failing **5 runs in 5** at default parallelism —
+      `ReadSample: The video recording device is preempted by another immersive
+      application (0xC00D3EA3)`, a different error code and the identical defect
+      to Linux's `Device or resource busy`. Measured on the pristine payload as
+      shipped, so pre-existing rather than introduced by round 8. `CAMERA` /
+      `camera_guard` are now `#[cfg(any(target_os = "linux", windows))]`.
+      Falsified both ways: 5/5 fail without, 0/5 with.
+
+- [x] **`build_deb.sh` now refuses a stale `Cargo.lock` (2026-09-03).** Found by
+      the Windows box in round 8: after the 0.2.5 bump the lockfile still said
+      `0.2.4`, and **cargo silently corrects it on the first ordinary build**,
+      which is why it was invisible. Anything passing `--locked` fails, so a CI
+      or reproducible build of a shipped payload breaks, and the first build on
+      any machine dirties the tree — a nuisance for the `diff -ruN` courier
+      workflow. It was a one-off caused by committing before building; earlier
+      bumps happened to build first. The guard is the same shape as the
+      package-vs-crate version check that already sat above it and did not cover
+      this file.
 
 
 - [ ] **REOPENED — the closure method, not just the item.** The 2026-08-31 proof

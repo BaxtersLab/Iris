@@ -118,6 +118,8 @@ mod tests {
             eprintln!("skipping wmf_controls_report_real_ranges_and_take_effect (set IRIS_USE_HW=1)");
             return;
         }
+        // Serialise camera access: see `camera_guard`.
+        let _camera = camera_guard();
         use crate::backend::UvcBackend as _;
         let backend = crate::backend::new_wmf_backend().expect("WmfBackend::new() failed");
         let devs = backend.enumerate_devices().await.expect("enumerate failed");
@@ -205,6 +207,8 @@ mod tests {
             eprintln!("skipping wmf_capture_real_frames (set IRIS_USE_HW=1)");
             return;
         }
+        // Serialise camera access: see `camera_guard`.
+        let _camera = camera_guard();
         let backend = crate::backend::new_wmf_backend().expect("WmfBackend::new() failed");
         let devs = backend.enumerate_devices().await.expect("enumerate failed");
         assert!(!devs.is_empty(), "no camera found");
@@ -427,13 +431,20 @@ mod tests {
     /// The unix lock test there solved it by giving each test its own resource.
     /// That is not available here: there is only one camera, so the resource
     /// has to be taken in turn instead.
-    #[cfg(target_os = "linux")]
+    ///
+    /// **Windows needs it too, and for the same reason** — round 8 measured the
+    /// WMF hardware tests failing **5 runs in 5** in parallel with
+    /// `ReadSample: The video recording device is preempted by another immersive
+    /// application (0xC00D3EA3)`, and 0 in 5 serially. Different error code,
+    /// identical defect. So this is `any(linux, windows)` rather than
+    /// linux-only.
+    #[cfg(any(target_os = "linux", windows))]
     static CAMERA: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Take the camera, tolerating a previous test having panicked while holding
     /// it — a poisoned lock means another test failed, not that this one cannot
     /// run, and reporting both failures is more useful than masking one.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn camera_guard() -> std::sync::MutexGuard<'static, ()> {
         CAMERA.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -646,6 +657,8 @@ mod tests {
             eprintln!("skipping wmf_negotiates_between_two_advertised_modes (set IRIS_USE_HW=1)");
             return;
         }
+        // Serialise camera access: see `camera_guard`.
+        let _camera = camera_guard();
         use crate::backend::UvcBackend as _;
         use crate::device::FormatRequest;
 
@@ -728,6 +741,8 @@ mod tests {
             eprintln!("skipping wmf_an_impossible_request_falls_back (set IRIS_USE_HW=1)");
             return;
         }
+        // Serialise camera access: see `camera_guard`.
+        let _camera = camera_guard();
         use crate::backend::UvcBackend as _;
         use crate::device::{FormatRequest, PixelFormat};
 
@@ -761,6 +776,84 @@ mod tests {
         let frame = backend.read_frame(id).await.expect("camera must still deliver frames");
         assert!(!frame.is_empty(), "fallback left the camera not producing frames");
         backend.close_device(id).await.expect("close failed");
+    }
+
+    // ---- WMF frame-rate negotiation (round 8) -----------------------------
+
+    /// `MF_MT_FRAME_RATE` must **round**, not truncate.
+    ///
+    /// 30000/1001 is 29.97fps — the rate every broadcast-derived device
+    /// reports. Truncation yields 29, so a correctly granted 30fps request
+    /// would warn on every single launch that it got 29. This read truncated
+    /// until round 8.
+    #[cfg(windows)]
+    #[test]
+    fn a_frame_rate_ratio_is_rounded_not_truncated() {
+        use crate::backend::fps_from_ratio;
+        assert_eq!(fps_from_ratio(30, 1), Some(30));
+        assert_eq!(fps_from_ratio(60, 1), Some(60));
+        // The cases truncation gets wrong:
+        assert_eq!(fps_from_ratio(30000, 1001), Some(30), "29.97 must read as 30");
+        assert_eq!(fps_from_ratio(60000, 1001), Some(60), "59.94 must read as 60");
+        assert_eq!(fps_from_ratio(24000, 1001), Some(24), "23.976 must read as 24");
+        // Genuinely fractional rates still round to nearest, not up.
+        assert_eq!(fps_from_ratio(29, 2), Some(15), "14.5 rounds to 15");
+        assert_eq!(fps_from_ratio(28, 2), Some(14));
+        // A ratio with a zero on either side is not a rate.
+        assert_eq!(fps_from_ratio(0, 1), None);
+        assert_eq!(fps_from_ratio(30, 0), None);
+    }
+
+    /// The rate preference, which **cannot be tested on this box's camera**.
+    ///
+    /// Every native mode the reference camera advertises is 30/1, so a
+    /// `choose_mode` ignoring the rate entirely would behave identically
+    /// against real hardware. This is the only place the preference is
+    /// exercised, which is why it covers the orderings rather than one case.
+    #[cfg(windows)]
+    #[test]
+    fn the_search_prefers_a_matching_rate_but_settles_for_the_mode() {
+        use crate::backend::choose_mode;
+        use crate::device::{FormatDescriptor, FormatRequest, PixelFormat};
+
+        let mode = |idx: u32, w: u32, h: u32, fps: u32| {
+            (
+                idx,
+                FormatDescriptor { width: w, height: h, fps, pixel_format: PixelFormat::Nv12 },
+            )
+        };
+        let req = |fps: u32| FormatRequest {
+            width: 640,
+            height: 480,
+            pixel_format: PixelFormat::Nv12,
+            fps,
+        };
+
+        // The rate match wins even though a mode-only match came FIRST — the
+        // ordering that catches a search which stops at the first mode hit.
+        let cands = vec![mode(0, 640, 480, 15), mode(1, 640, 480, 30)];
+        assert_eq!(choose_mode(&req(30), &cands), Some((1, true)));
+
+        // ...and when the rate match comes first, it still wins.
+        let cands = vec![mode(0, 640, 480, 30), mode(1, 640, 480, 15)];
+        assert_eq!(choose_mode(&req(30), &cands), Some((0, true)));
+
+        // No mode offers the rate: settle for the mode, and say the rate did
+        // not match. A wrong rate is much less bad than the wrong resolution.
+        let cands = vec![mode(0, 640, 480, 15), mode(1, 640, 480, 20)];
+        assert_eq!(choose_mode(&req(30), &cands), Some((0, false)));
+
+        // fps == 0 is "do not ask": reduces to round 7's mode-only search, so
+        // the first mode match wins regardless of rate.
+        let cands = vec![mode(0, 640, 480, 15), mode(1, 640, 480, 30)];
+        assert_eq!(choose_mode(&req(0), &cands), Some((0, false)));
+
+        // The rate must never rescue a mode that does not match.
+        let cands = vec![mode(0, 1920, 1080, 30)];
+        assert_eq!(choose_mode(&req(30), &cands), None);
+
+        // Nothing at all.
+        assert_eq!(choose_mode(&req(30), &[]), None);
     }
 
     // ---- V4L2 backend (Linux mirror of the WMF tests) ----------------------
