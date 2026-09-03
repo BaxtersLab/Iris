@@ -765,6 +765,23 @@ impl IrisRuntime {
                             // that wants to be stricter can be, and
                             // max_age_ms=0 turns the check off entirely.
                             let max_age_ms = param("max_age_ms").unwrap_or(10_000);
+                            // Refuse a frame that carries no information, in
+                            // tenths of a unit of luma standard deviation so
+                            // the knob stays an integer like the others.
+                            //
+                            // Default 5 (= 0.5). Chosen from measurement, not
+                            // intuition: a live frame from a **dark room** on
+                            // this box measured 3.17 and is a perfectly real
+                            // picture, while the synthetic frame measured
+                            // 0.000. Anything higher starts refusing real
+                            // pictures of dim scenes. What is provable here is
+                            // the *absence* of variation, not the presence of a
+                            // subject — so this catches the blank frame and
+                            // deliberately nothing more.
+                            //
+                            // `min_detail=0` disables it, as `max_age_ms=0`
+                            // disables the staleness check.
+                            let min_detail_tenths = param("min_detail").unwrap_or(5);
 
                             let latest = match http_frames.lock() {
                                 Ok(rb) => rb.read_latest().cloned(),
@@ -823,6 +840,39 @@ impl IrisRuntime {
                                     match iris_capture::snapshot::snapshot(
                                         &frame, max_width, quality, mirror,
                                     ) {
+                                        // A frame with no variation is worse
+                                        // than no frame: a vision model given a
+                                        // featureless image invents content
+                                        // rather than abstaining, in the same
+                                        // confident tone as a true description,
+                                        // and nothing downstream can tell them
+                                        // apart. Refusing costs a caller one
+                                        // 503 it already handles; serving costs
+                                        // it a fabrication it cannot detect.
+                                        Ok(snap)
+                                            if min_detail_tenths > 0
+                                                && (snap.detail * 10.0)
+                                                    < min_detail_tenths as f32 =>
+                                        {
+                                            (
+                                                503,
+                                                format!(
+                                                    concat!(
+                                                        "{{\"error\":\"the frame carries no ",
+                                                        "detail (luma sd {:.3}, floor {:.1}) — ",
+                                                        "a covered lens, an unlit scene or a ",
+                                                        "synthetic backend. A vision model will ",
+                                                        "describe this frame rather than report ",
+                                                        "it as blank.\",",
+                                                        "\"detail\":{:.3},\"min_detail\":{:.1}}}"
+                                                    ),
+                                                    snap.detail,
+                                                    min_detail_tenths as f32 / 10.0,
+                                                    snap.detail,
+                                                    min_detail_tenths as f32 / 10.0,
+                                                ),
+                                            )
+                                        }
                                         Ok(snap) => (
                                             200,
                                             format!(
@@ -830,6 +880,7 @@ impl IrisRuntime {
                                                     "{{\"sequence\":{},\"width\":{},",
                                                     "\"height\":{},\"captured_us\":{},",
                                                     "\"age_ms\":{},\"mirrored\":{},",
+                                                    "\"detail\":{:.3},",
                                                     "\"mime\":\"{}\",\"data_url\":\"{}\"}}"
                                                 ),
                                                 slot.sequence,
@@ -838,6 +889,7 @@ impl IrisRuntime {
                                                 slot.timestamp_us,
                                                 age_ms.unwrap_or(0),
                                                 mirror,
+                                                snap.detail,
                                                 snap.mime,
                                                 snap.data_url()
                                             ),

@@ -13,6 +13,35 @@ the upgrade, so a published build would never reach anyone who already had one.
 `build_deb.sh` now refuses to build when the package version and the `iris-ui`
 crate version disagree.
 
+0.2.7 — 2026-09-03
+------------------
+`/frame` refuses a frame that carries no detail
+- **A vision model handed a featureless image invents rather than abstaining.**
+  Measured against Iris's own synthetic frame — a uniform grey field, one
+  distinct colour across 331 776 pixels — a local Qwen2.5-VL described "a person
+  standing in a room… a window with curtains, and a table with a lamp", in the
+  same confident register as its correct description of a real camera frame. A
+  covered lens, an unlit room, a dead sensor or a mock backend therefore yields
+  fabricated content nothing downstream can distinguish from truth.
+- **`/frame` now answers 503** with the measurement and a plain reason, exactly
+  as it already refuses a stale frame. `detail` (luma standard deviation, taken
+  on the **downscaled** pixels — the image the model sees) is returned on every
+  success too, so a caller can apply a stricter policy. `min_detail` sets the
+  floor in tenths, default 5 (= 0.5); `min_detail=0` disables it.
+- **The threshold is measured, not guessed.** A real frame from a dark room
+  scored **3.17** — a legitimate picture — against the synthetic frame's
+  **0.000**. A floor of 5 or 10, which intuitively looks low, would refuse real
+  pictures of dim scenes. Iris can prove the *absence* of variation, not the
+  presence of a subject, so the guard catches the blank frame and nothing more.
+- **Prompting is defence in depth, not the mechanism.** Given permission to
+  abstain the model answered "The image is blank"; asked plainly to describe, it
+  hallucinated; asked directly whether anything was visible it called a mid-grey
+  field "completely black". Its own account of a blank frame is unreliable, so it
+  cannot be its own detector — and Iris does not control the consumer's wording.
+- `Snapshot` loses its `Eq` derive: `detail` is an `f32` and NaN is not
+  reflexive. The NaN case is itself a test, because a NaN score compares false
+  against every threshold and would serve the frame the check exists to refuse.
+
 0.2.6 — 2026-09-03
 ------------------
 Frame rate negotiated on Windows; and a stale lockfile that broke `--locked`

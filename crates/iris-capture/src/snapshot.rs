@@ -26,7 +26,9 @@ use crate::frame::CaptureFrame;
 use iris_hal::device::PixelFormat;
 
 /// A frame prepared for a vision model.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// `Eq` is gone as of 2026-09-03: `detail` is an f32 and NaN is not reflexive.
+// The type is compared in tests only, where `PartialEq` is what is used anyway.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     /// Width after downscaling.
     pub width: u32,
@@ -36,6 +38,15 @@ pub struct Snapshot {
     pub mime: &'static str,
     /// Base64 of the JPEG bytes, without any prefix.
     pub base64: String,
+    /// Population standard deviation of luma across the **downscaled** image —
+    /// how much variation the picture actually carries.
+    ///
+    /// Served with every frame so a caller can apply its own policy, and used by
+    /// `/frame` to refuse a frame that carries no information at all. Measured
+    /// on the downscaled pixels deliberately: that is the image the model sees,
+    /// and a detail metric taken at a resolution nobody consumes would be
+    /// measuring the wrong thing.
+    pub detail: f32,
 }
 
 impl Snapshot {
@@ -204,6 +215,55 @@ fn to_rgb24(frame: &CaptureFrame) -> Result<(u32, u32, Vec<u8>), SnapshotError> 
     }
 }
 
+/// How much variation an RGB24 image carries, as the population standard
+/// deviation of BT.601 luma.
+///
+/// **Why this exists.** A vision model handed a featureless frame does not
+/// abstain — it invents. Measured on 2026-09-03 against a uniform grey field
+/// (RGB 130,130,130, one distinct colour across 331 776 pixels), a local
+/// Qwen2.5-VL described "a person standing in a room... a window with curtains,
+/// and a table with a lamp", in the same confident register as its correct
+/// description of a real camera frame. A lens cap, an unlit room or a mock
+/// backend therefore yields fabricated content that nothing downstream can
+/// distinguish from truth.
+///
+/// **Why the caller cannot be trusted to catch it.** Prompting helps and is not
+/// sufficient: given explicit permission to abstain the same model answered
+/// correctly, but asked a plain "describe what you see" — the phrasing anyone
+/// writes first — it hallucinated, and asked directly whether anything was
+/// visible it called a mid-grey field "completely black". Its own account of a
+/// blank frame is unreliable, so the model cannot be its own detector, and Iris
+/// does not control the consumer's wording. The check has to happen here, in
+/// pixel space.
+///
+/// **Why the threshold must be low.** Real frames can be very flat. A live
+/// camera frame from this box measured **3.17** with a luma mean of 10 — a dark
+/// room, entirely legitimate — while the synthetic frame measured **0.000**. A
+/// threshold chosen by intuition rather than measurement would have refused a
+/// real picture. What is provable is the *absence* of variation, not the
+/// presence of a subject.
+pub fn detail_score(rgb: &[u8], width: u32, height: u32) -> f32 {
+    let n = (width as usize).saturating_mul(height as usize);
+    if n == 0 || rgb.len() < n * 3 {
+        return 0.0;
+    }
+    let mut sum = 0.0f64;
+    let mut sum_sq = 0.0f64;
+    for px in rgb.chunks_exact(3).take(n) {
+        let luma = 0.299 * px[0] as f64 + 0.587 * px[1] as f64 + 0.114 * px[2] as f64;
+        sum += luma;
+        sum_sq += luma * luma;
+    }
+    let mean = sum / n as f64;
+    // Population variance, clamped at zero: the algebraic form can go very
+    // slightly negative on a constant image through floating-point rounding,
+    // and a negative variance would make the sqrt NaN — which compares false
+    // against every threshold and would silently serve the exact frame this
+    // function exists to catch.
+    let var = (sum_sq / n as f64 - mean * mean).max(0.0);
+    var.sqrt() as f32
+}
+
 /// Box-filter downscale to at most `max_width`, preserving aspect ratio.
 ///
 /// Averaging the source pixels that fall in each destination pixel, rather than
@@ -331,6 +391,11 @@ pub fn snapshot(
         mirror_rgb24(&mut scaled, dw, dh);
     }
 
+    // Measured on the scaled pixels, before encoding: this is exactly the image
+    // that reaches the model, and JPEG would add compression noise to a flat
+    // field that is not information.
+    let detail = detail_score(&scaled, dw, dh);
+
     let mut jpeg = Vec::new();
     let encoder = jpeg_encoder::Encoder::new(&mut jpeg, quality.clamp(1, 100));
     encoder
@@ -345,6 +410,7 @@ pub fn snapshot(
     Ok(Snapshot {
         width: dw,
         height: dh,
+        detail,
         mime: "image/jpeg",
         base64: base64_encode(&jpeg),
     })
@@ -682,6 +748,95 @@ mod tests {
         .expect("YUYV must reach a JPEG");
         assert_eq!((snap.width, snap.height), (64, 64));
         assert!(snap.data_url().starts_with("data:image/jpeg;base64,"));
+    }
+
+    // ---- detail / the blank-frame guard ------------------------------------
+    //
+    // Measured 2026-09-03: a local Qwen2.5-VL handed a uniform grey field
+    // (RGB 130,130,130, one distinct colour across 331 776 pixels) described
+    // "a person standing in a room... a window with curtains, and a table with
+    // a lamp" — in the same confident register as its correct description of a
+    // real camera frame. A model given a featureless image invents; it does not
+    // abstain. These tests pin the detector that keeps such a frame from ever
+    // reaching one.
+
+    /// A uniform image must score exactly zero — and must not produce NaN.
+    ///
+    /// NaN is the dangerous outcome, not a wrong number: it compares `false`
+    /// against every threshold, so a NaN score would *serve* the very frame the
+    /// check exists to refuse. The algebraic variance form can go slightly
+    /// negative on a constant image through rounding, which is why the
+    /// implementation clamps before the square root.
+    #[test]
+    fn a_uniform_image_scores_zero_and_never_nan() {
+        for value in [0u8, 130, 255] {
+            let rgb = vec![value; 64 * 64 * 3];
+            let d = detail_score(&rgb, 64, 64);
+            assert!(!d.is_nan(), "a constant image must not score NaN (value {value})");
+            assert_eq!(d, 0.0, "a constant image carries no variation (value {value})");
+        }
+    }
+
+    /// A frame with real structure must score well clear of zero.
+    #[test]
+    fn a_structured_image_scores_above_zero() {
+        // A half-black, half-white split: maximum possible spread.
+        let mut rgb = vec![0u8; 64 * 64 * 3];
+        for y in 32..64 {
+            for x in 0..64 {
+                let i = (y * 64 + x) * 3;
+                rgb[i] = 255;
+                rgb[i + 1] = 255;
+                rgb[i + 2] = 255;
+            }
+        }
+        let d = detail_score(&rgb, 64, 64);
+        assert!(d > 100.0, "a black/white split should score high, got {d}");
+    }
+
+    /// **The case that sets the threshold.** A real frame from a dark room on
+    /// this box measured a luma standard deviation of **3.17** — mean luma 10,
+    /// range 4..45 — and is a perfectly legitimate picture. The synthetic frame
+    /// measured 0.000. The default floor is 0.5, so a dark room passes with six
+    /// times the margin while a blank field is refused.
+    ///
+    /// This is here because the obvious mistake is to pick a threshold by
+    /// intuition. Anything in the 5–10 range, which "looks low", refuses real
+    /// pictures of dim scenes.
+    #[test]
+    fn a_dark_but_real_scene_is_not_mistaken_for_a_blank_one() {
+        // Reconstruct the measured shape: mostly very dark, a few brighter
+        // pixels, nothing like a uniform field.
+        let (w, h) = (64u32, 64u32);
+        let mut rgb = vec![8u8; (w * h * 3) as usize];
+        for i in (0..(w * h) as usize).step_by(37) {
+            rgb[i * 3] = 45;
+            rgb[i * 3 + 1] = 45;
+            rgb[i * 3 + 2] = 45;
+        }
+        let d = detail_score(&rgb, w, h);
+        assert!(
+            d > 0.5,
+            "a dark but real scene must clear the 0.5 floor, got {d}"
+        );
+        assert!(
+            d < 30.0,
+            "sanity: this fixture is meant to be dim, got {d}"
+        );
+    }
+
+    /// The score is taken on the pixels the caller receives, so a request that
+    /// downscales still gets a score describing what the model will see.
+    #[test]
+    fn the_score_travels_with_the_snapshot() {
+        let blank = snapshot(
+            &frame(64, 64, PixelFormat::Rgb24, vec![130; 64 * 64 * 3]),
+            0,
+            80,
+            false,
+        )
+        .expect("uniform frames still encode");
+        assert_eq!(blank.detail, 0.0, "a blank snapshot must report zero detail");
     }
 
     #[test]

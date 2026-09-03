@@ -622,7 +622,25 @@ shelf. **23s on CPU, 449 prompt tokens for a 768px frame.**
 That is the premise of the whole project demonstrated: an agent can see through
 Iris, with no client library and no second transport.
 
-- [ ] **CRITICAL: a featureless frame produces a confident fabrication, not "I
+- [x] **DONE 2026-09-03 (0.2.7) — `/frame` refuses a frame that carries no
+      detail.** `snapshot::detail_score` measures the population standard
+      deviation of luma **on the downscaled pixels** — the image the model
+      actually sees — and it is returned as `detail` on every success so a caller
+      can be stricter. `min_detail` (tenths of a unit, default 5 = 0.5) sets the
+      floor; `min_detail=0` disables it, as `max_age_ms=0` disables staleness.
+
+      **Live:** the synthetic backend is refused with
+      `luma sd 0.000, floor 0.5`, and a real frame from a **dark room** is served
+      at `detail: 2.935`. Falsified two ways — a detector that always claims
+      detail fails 4 tests, and an unclamped variance produces NaN, which is the
+      dangerous outcome because NaN compares false against every threshold and
+      would serve the exact frame the check exists to refuse.
+
+      Documented in `AGENT_VISION.md`, including the prompt guidance as defence
+      in depth and the plain statement that a 200 is not a guarantee of visible
+      content. The original finding:
+
+      **CRITICAL: a featureless frame produces a confident fabrication, not "I
       see nothing".** The control run sent the **mock backend's synthetic
       frame** — verified to be exactly **one colour**, RGB(130,130,130) across
       all 331 776 pixels — and the same model, same prompt, answered:

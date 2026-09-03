@@ -67,12 +67,76 @@ a reason; the camera's full resolution is always available with `max_width=0`.
 | status | meaning |
 |---|---|
 | `200` | A frame. `sequence` increases per captured frame — compare it to tell a fresh frame from one you already have. |
-| `503` | Nothing captured yet. Iris is running but capture has not produced a frame; start capture. |
+| `503` | Nothing captured yet, the newest frame is too old, **or the frame carries no detail** — see below. The body says which. |
 | `500` | The frame could not be converted. The message says why. |
 
 Every successful answer carries **`age_ms`** — how old the frame was when it was
 served, computed here so no caller has to reason about clock skew. `captured_us`
 is the absolute capture time if you want it.
+
+### A served frame is not a guarantee of visible content
+
+**This is the most important paragraph in this document.**
+
+A vision model handed a featureless image **does not abstain — it invents.**
+Measured on 2026-09-03 against Iris's own synthetic frame (a uniform grey field,
+RGB 130,130,130, one distinct colour across 331 776 pixels), a local Qwen2.5-VL
+answered:
+
+> "The image is a black and white photograph of a person standing in a room. The
+> person is wearing a white shirt... The room has a window with curtains, and
+> there is a table with a lamp on it."
+
+A person, a window, curtains and a lamp, in a blank grey field — **in the same
+confident register as its correct description of a real camera frame.** A covered
+lens, an unlit room, a dead sensor or a mock backend therefore yields fabricated
+content that nothing downstream can distinguish from truth.
+
+So `/frame` **refuses** a frame that carries no information:
+
+```
+503  {"error":"the frame carries no detail (luma sd 0.000, floor 0.5) — a covered
+      lens, an unlit scene or a synthetic backend. A vision model will describe
+      this frame rather than report it as blank.",
+      "detail":0.000,"min_detail":0.5}
+```
+
+| parameter | meaning |
+|---|---|
+| `min_detail` | Floor in **tenths** of a unit of luma standard deviation. Default `5` (= 0.5). `0` disables the check. |
+| `detail` | Returned on **every** success too, so a caller can apply a stricter policy of its own. |
+
+**The threshold is deliberately low, and that is a measurement, not a guess.** A
+real frame from a **dark room** on the development box measured **3.17** — a
+perfectly legitimate picture — while the synthetic frame measured **0.000**. A
+floor of 5 or 10, which intuitively "looks low", would refuse real pictures of
+dim scenes. What Iris can prove is the *absence* of variation, not the presence
+of a subject; the guard catches the blank frame and deliberately nothing more.
+If you want "too dark to be useful" refused as well, read `detail` and decide —
+do not assume a 200 means the picture is worth looking at.
+
+### Ask in a way that lets the model say "nothing"
+
+Defence in depth, **not** the mechanism — the guard above is the mechanism.
+
+Prompting measurably helps and is not sufficient. On the same blank frame and the
+same model:
+
+| prompt | answer |
+|---|---|
+| *"Describe what you see"* | a person, a shirt, a window, curtains, a lamp |
+| *"…if the image is blank or uniform, say exactly that"* | **"The image is blank."** |
+| *"Is there any discernible object? Yes or no first"* | *"No. The image is **completely black**…"* |
+
+Three things follow. The **naive** phrasing is the dangerous one, and it is the
+one most people write first. The third answer is right in verdict and wrong in
+detail — the field is mid-grey, not black — so **the model's own account of a
+blank frame is unreliable and cannot be used as the detector**. And Iris does not
+control your prompt, which is why the pixel-space check exists regardless of how
+you ask.
+
+Give the model explicit permission to report nothing, and treat a 503 from
+`/frame` as the authoritative "I cannot see".
 
 ### Pixel formats — every format the camera can deliver
 
