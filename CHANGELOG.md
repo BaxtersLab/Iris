@@ -45,11 +45,20 @@ Frame rate negotiated on Windows; and a stale lockfile that broke `--locked`
   build, so it is invisible until something passes `--locked` — and then every
   CI or reproducible build of that payload fails. Same class as the
   package-vs-crate version guard that already sat beside it.
-- **Still unproven, and now on three devices:** no camera in this estate
-  advertises more than one frame rate for a single mode, so neither platform can
-  demonstrate that rate negotiation changes anything. The round-8 probe also
-  checked the MIN/MAX range attributes, not just the nominal rate. The logic is
-  proven by construction and unit test; the transition tests exist and skip.
+- **Frame-rate negotiation is PROVEN on Linux** — against `vivid`, the kernel's
+  own in-tree Virtual Video Test Driver, which advertises 13 discrete rates per
+  mode where no physical camera in this estate advertises more than one.
+  Requested 120fps → granted 120fps, requested 1fps → granted 1fps; and with
+  `negotiate_fps` suppressed the device kept the previous run's rate and the
+  transition test failed. `vivid` is a real V4L2 driver behind a real
+  `/dev/videoN`, so the genuine kernel ioctl path is exercised — it is not a
+  physical camera, and that limit is stated rather than glossed.
+  The transition test now searches **every device and every mode**; narrowing to
+  the first of each is what had made it skip on a box that could run it.
+- **Windows remains unproven** — no `vivid` equivalent is installed there, so its
+  preference logic still rests on `choose_mode`'s unit tests.
+- No version bump: this round is **test-only**, and the packaged binary is
+  unchanged.
 
 0.2.5 — 2026-09-02
 ------------------

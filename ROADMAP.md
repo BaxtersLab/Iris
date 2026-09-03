@@ -429,30 +429,56 @@ contribute **zero tests** — a question a green workspace total cannot answer.
       mode and warns twice, naming the delivered `@30fps`. Windows gate
       **196 passed, 0 failed, 0 warnings** (194 baseline, prediction exact).
 
-- [ ] **UNPROVEN ESTATE-WIDE: no camera here can demonstrate that frame-rate
-      negotiation does anything.** Both platforms implement it; neither can show
-      it changing a device's behaviour.
+- [x] **LINUX PROVEN 2026-09-03 — frame-rate negotiation demonstrably moves the
+      device.** The gap was never in the code; it was that no *physical* camera
+      in this estate advertises more than one rate for a mode (Linux camera: all
+      9 modes 30fps; Windows camera: all 17 media types `30/1`, MIN/MAX range
+      attributes checked too, since a camera can express a choice as a range).
 
-      * Linux camera: all 9 modes advertise 30fps.
-      * Windows camera: all **17** native media types advertise `30/1`, and the
-        round-8 probe checked `MF_MT_FRAME_RATE_RANGE_MIN`/`_MAX` as well as the
-        nominal rate — **a camera can express a choice as a range rather than as
-        separate types**, and a probe reading only the nominal would have missed
-        it. Min == max == nominal on all 17.
-      * A third, older camera (`USB\VID_0545&PID_8135`, Xirlink) was plugged in
-        specifically to settle this and **never reaches Media Foundation at
-        all**: device status `Error`, `CM_PROB_FAILED_INSTALL`, no class. It had
-        previously been described as "too old, sends a different format" — it
-        does not send a format, because Windows never installs a driver, so it
-        never becomes a camera. No mapping in `subtype_to_pixel_format` could
-        reach it; only a driver could, and none exists for Win10 x64.
+      Closed with **`vivid`**, the kernel's own in-tree Virtual Video Test Driver
+      (`CONFIG_VIDEO_VIVID`, already present on this box). It advertises **13
+      discrete rates per mode** — 1, 2, 4, 5, 10, 13, 15, 25, 30, 40, 50, 60, 120:
 
-      What would close this is **one device advertising two rates for a single
-      mode**. Until then the preference logic is proven by construction and by
-      unit test — `choose_mode` was extracted as a pure function in round 8
-      precisely because hardware cannot exercise it — and the transition tests on
-      both platforms exist and **skip**, printing what each mode offers so the
-      reason stays visible rather than inferred.
+      ```
+      sudo modprobe vivid          # appears as /dev/video2, vivid-000-vid-cap
+      IRIS_USE_HW=1 cargo test -p iris-hal v4l2_negotiates_between_two
+
+      using /dev/video2 320x180 YUYV with rates [1, 2, 4, ... 60, 120]
+        requested 120fps -> granted 120fps
+        requested   1fps -> granted   1fps
+      ```
+
+      **Falsified**, which is the half that matters. With `negotiate_fps`
+      suppressed — the pre-0.2.5 behaviour — the device simply kept whatever the
+      previous run had left it on:
+
+      ```
+        requested 120fps -> granted 1fps
+        requested   1fps -> granted 1fps
+        FAILED: both requests returned the same rate — the interval is not
+                reaching the driver
+      ```
+
+      **What this proves and what it does not.** `vivid` is a real V4L2 driver
+      behind a real `/dev/videoN`: `S_PARM`, `G_PARM` and `ENUM_FRAMEINTERVALS`
+      all execute the genuine kernel ioctl path, unlike `MockUvcBackend`, which
+      bypasses it entirely. So the negotiation code, the read-back and the
+      reporting are proven. It is **not** a physical camera, so it does not prove
+      any particular USB device obeys — but "no device we own offers a choice"
+      was never evidence the code was wrong, and now it is not evidence of
+      anything unproven either.
+
+      The test searches **every device and every mode**, so it finds `vivid`
+      automatically when loaded and skips with a message naming `modprobe vivid`
+      when it is not. Narrowing to `devs[0]` and its first mode is what had made
+      it skip on a box that could in fact run it.
+
+- [ ] **Windows: still unproven, and `vivid` has no equivalent there.** The WMF
+      preference logic rests on `choose_mode`'s unit tests, which is why
+      extracting it as a pure function in round 8 was the right instinct. A
+      DirectShow/MF virtual camera could close it; none is installed, and it is
+      a heavier dependency than a kernel module already in the tree.
+
 
 - [x] **The hardware suites take a camera lock on both platforms (round 8).**
       The WMF tests were failing **5 runs in 5** at default parallelism —

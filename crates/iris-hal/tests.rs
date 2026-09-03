@@ -350,40 +350,50 @@ mod tests {
         let backend = V4l2UvcBackend::new();
         let devs = backend.enumerate_devices().await.expect("enumerate failed");
         assert!(!devs.is_empty(), "no capture devices");
-        let id = &devs[0].id;
-        let caps = backend.probe_capabilities(id).await.expect("probe failed");
-        // Search EVERY advertised mode for one offering a choice of rate, not
-        // just the first. A camera commonly offers several rates only at lower
-        // resolutions, and testing the first mode alone would skip on hardware
-        // that could in fact demonstrate the transition.
+        // Search EVERY device and EVERY mode for one offering a choice of rate.
+        //
+        // Not just `devs[0]`, and not just its first mode. A camera commonly
+        // offers several rates only at lower resolutions, and a box may have
+        // more than one capture device — including the kernel's own `vivid`
+        // test driver, which exists precisely to provide modes real hardware
+        // does not. Narrowing to one device and one mode is how this test came
+        // to skip on a box that could in fact run it.
         let mut found = None;
-        for m in &caps.formats {
-            let rates = backend
-                .advertised_frame_rates(id, m)
-                .await
-                .expect("interval enumeration failed");
-            eprintln!(
-                "  {}x{} {} offers rates {rates:?}",
-                m.width, m.height, m.pixel_format
-            );
-            if rates.len() >= 2 && found.is_none() {
-                found = Some((m.clone(), rates));
+        for dev in &devs {
+            let caps = match backend.probe_capabilities(&dev.id).await {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            for m in &caps.formats {
+                let rates = backend
+                    .advertised_frame_rates(&dev.id, m)
+                    .await
+                    .unwrap_or_default();
+                eprintln!(
+                    "  {} {}x{} {} offers rates {rates:?}",
+                    dev.id, m.width, m.height, m.pixel_format
+                );
+                if rates.len() >= 2 && found.is_none() {
+                    found = Some((dev.id.clone(), m.clone(), rates));
+                }
             }
         }
-        let (mode, rates) = match found {
+        let (dev_id, mode, rates) = match found {
             Some(v) => v,
             None => {
                 eprintln!(
-                    "SKIP: no mode on this camera advertises more than one frame rate — \
-                     a transition cannot be demonstrated on this hardware. The negotiation \
-                     path itself is covered by the pure tests and by the live run."
+                    "SKIP: no mode on any capture device here advertises more than one \
+                     frame rate, so a transition cannot be demonstrated. The negotiation \
+                     path is still covered by the pure tests and the live run; \
+                     `sudo modprobe vivid` provides a device that does offer a choice."
                 );
                 return;
             }
         };
+        let id = &dev_id;
         eprintln!(
-            "using {}x{} {} with rates {rates:?}",
-            mode.width, mode.height, mode.pixel_format
+            "using {} {}x{} {} with rates {rates:?}",
+            id, mode.width, mode.height, mode.pixel_format
         );
 
         async fn ask(
@@ -408,15 +418,20 @@ mod tests {
             eprintln!("requested {fps}fps -> granted {}fps", got.fps);
             got.fps
         }
-        let first = ask(&backend, id, &mode, rates[0]).await;
-        let second = ask(&backend, id, &mode, rates[1]).await;
+        // The widest spread available, not the first two: a driver that
+        // silently clamps everything into a narrow band would still satisfy two
+        // adjacent values, and the point is to move the rate as far as the
+        // device claims it can go.
+        let (lo, hi) = (rates[0], rates[rates.len() - 1]);
+        let first = ask(&backend, id, &mode, hi).await;
+        let second = ask(&backend, id, &mode, lo).await;
 
         assert_ne!(
             first, second,
             "both requests returned the same rate — the interval is not reaching the driver"
         );
-        assert_eq!(first, rates[0], "an advertised rate was requested but not granted");
-        assert_eq!(second, rates[1], "an advertised rate was requested but not granted");
+        assert_eq!(first, hi, "an advertised rate was requested but not granted");
+        assert_eq!(second, lo, "an advertised rate was requested but not granted");
     }
 
     /// One camera, one test at a time.
