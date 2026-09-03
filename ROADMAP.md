@@ -610,6 +610,34 @@ verified removed (`diff -rq` clean, no patch returned).
       which needs no per-format knowledge. The round-6 probe hit this and caught
       it before reporting a phantom defect in the one format that round was about.
 
+## Agent vision — the integration contract, decided 2026-09-03
+
+**The harness attaches the frame; the model does not fetch it.** Written up in
+`docs/AGENT_VISION.md`.
+
+- [x] **Decided by measurement.** The intended shape — a `look()` tool the agent
+      calls — does not work on this estate today, and the reason is not the
+      models. **Neither GGUF carries a tool-capable chat template**: `/props`
+      reports templates of 1057 and 1281 characters, and neither mentions
+      `tools` or `tool_call`. `llama-server` has nothing to render a `tools`
+      array into, so it is dropped and the model never learns a tool exists — it
+      is answering a bare question, not declining an offer. Confirmed on the
+      vision model with `tool_choice` **forced**, and on a function-calling
+      branded text model (Hermes-2-Pro-Mistral-7B) with an ordinary
+      `get_weather` tool. Both refused; neither emitted a call.
+
+- [ ] **Not Iris's to fix: a tool-capable chat template in the model layer.**
+      Belongs to SOC / GGUF-Chatbox, where "cannot tool-call" is already a known
+      open item. **Nothing in Iris changes when it lands** — the two-slot design
+      already accommodates it, because a tool *result* is text: A5 calls
+      `look()`, the harness asks A4 to describe the frame, and A4's description
+      is the result. That is why the A4/A5 split is worth keeping.
+
+- [ ] **Harness work, and it is not Iris's either.** Someone has to own the loop
+      above: fetch, attach, and — on a 503 — put the reason into the
+      conversation as text rather than silently omitting the image and letting
+      the model answer from imagination.
+
 ## Agent vision — the loop is proven, and it has one dangerous failure mode
 
 **End to end, 2026-09-03, on this box, no new code:** `llama-server` with

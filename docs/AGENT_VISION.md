@@ -74,6 +74,62 @@ Every successful answer carries **`age_ms`** — how old the frame was when it w
 served, computed here so no caller has to reason about clock skew. `captured_us`
 is the absolute capture time if you want it.
 
+## The integration contract
+
+Decided 2026-09-03 by measurement, not preference. **The harness attaches the
+frame; the model does not fetch it.**
+
+```
+  user turn ──► harness ──GET /frame──► Iris ──► 200 + data_url
+                   │                          └─► 503 + reason
+                   ▼
+        build one chat-completions request:
+          [ {"type":"text",      "text": <the user's question, phrased to
+                                          permit "nothing">},
+            {"type":"image_url", "image_url":{"url": <data_url>}} ]
+                   ▼
+             vision slot (A4)  ──►  answer
+```
+
+On a **503** the harness puts the reason into the conversation as text — *"the
+camera cannot be read right now: <reason>"* — and sends **no image**. It must not
+silently omit the frame and let the model answer from imagination, which is the
+failure this endpoint's `detail` check exists to prevent.
+
+### Why not a `look()` tool the model calls
+
+That was the intended shape, and it does not work on this estate today. Measured
+on 2026-09-03:
+
+| test | result |
+|---|---|
+| vision model + `look` tool, `tool_choice: auto` | no tool call — refuses, *"as an AI language model…"* |
+| vision model + `look`, `tool_choice` **forced** | no tool call |
+| text model (Hermes-2-Pro-Mistral-7B) + ordinary `get_weather` tool | no tool call |
+
+The mechanical reason is not the models. **Neither GGUF carries a tool-capable
+chat template** — `/props` shows templates of 1057 and 1281 characters, and
+neither mentions `tools` or `tool_call` anywhere. `llama-server` therefore has
+nothing to render a `tools` array into: it is dropped, and the model never sees
+that a tool exists. It is answering a bare question, not declining an offer.
+
+So this is a **packaging prerequisite in the model layer** — a chat template that
+renders tool definitions — and it belongs to SOC / GGUF-Chatbox, not to Iris.
+Nothing in Iris needs to change when it lands.
+
+### What changes when tool-calling does work
+
+The two-slot design already accommodates it, and this is the reason the split is
+worth keeping. In the OpenAI format **a tool result is text, never an image**, so
+a `look()` tool cannot hand a picture to the model that called it. It does not
+need to:
+
+* **A5 (text)** reasons and calls `look()`;
+* the harness fetches `/frame` and asks **A4 (vision)** to describe it;
+* **A4's description is the tool result** — text, which the format supports.
+
+Iris's role is identical in both designs: serve a frame, or say why it cannot.
+
 ### A served frame is not a guarantee of visible content
 
 **This is the most important paragraph in this document.**
