@@ -32,6 +32,14 @@ Frame rate negotiated on Windows; and a stale lockfile that broke `--locked`
   were failing 5 runs in 5 at default parallelism (`0xC00D3EA3`, "preempted by
   another immersive application") — a different error code and the identical
   defect to Linux's `EBUSY`. Measured on the payload as shipped, so pre-existing.
+- **`build_deb.sh` refuses a stale release binary.** It packages whatever is in
+  `target/release`; it does not build. So a binary left from the previous version
+  ships under the new version number, and every check comparing the `.deb` to
+  `target/release/iris-ui` still passes — because **both are stale together**.
+  That happened at 0.2.6 and was caught only by rebuilding and noticing the hash
+  move. The same trap in a different coat as `run.sh` launching a stale
+  `target/release` while a green gate had built only debug: comparing artefacts
+  to each other cannot catch it, only comparing them to the source can.
 - **`build_deb.sh` refuses a stale `Cargo.lock`.** After the 0.2.5 bump the
   lockfile still said 0.2.4; cargo silently corrects it on the first ordinary
   build, so it is invisible until something passes `--locked` — and then every

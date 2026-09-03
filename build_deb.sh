@@ -58,6 +58,26 @@ BIN="$TARGET_DIR/release/iris-ui"
 [ -x "$BIN" ] || {
     echo "FATAL: $BIN not built. Run: cargo build --workspace --release" >&2; exit 1; }
 
+# ...and it must be NEWER than every source file it was built from.
+#
+# This script packages whatever binary is already there; it does not build one.
+# So a release binary left over from the previous version gets packaged under the
+# new version number, and every check that compares the .deb against
+# `target/release/iris-ui` still passes — because both are stale together. That
+# is exactly what happened at 0.2.6: the packaged binary matched the release
+# binary and both predated the change.
+#
+# The same trap in a different coat as `run.sh` launching a stale
+# `target/release` while a green gate had only built debug. Comparing artefacts
+# to each other cannot catch it; only comparing them to the SOURCE can.
+STALE="$(find "$HERE/crates" "$HERE/Cargo.toml" "$HERE/Cargo.lock" -type f -newer "$BIN" -print -quit 2>/dev/null)"
+if [ -n "$STALE" ]; then
+    echo "FATAL: $BIN is older than $STALE" >&2
+    echo "       run 'cargo build --workspace --release' first — this script packages," >&2
+    echo "       it does not build, and a stale binary ships under the new version" >&2
+    exit 1
+fi
+
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 DEST="$STAGE/opt/baxters/iris"
 mkdir -p "$DEST/target/release" "$STAGE/usr/share/applications"
