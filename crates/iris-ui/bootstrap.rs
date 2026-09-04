@@ -976,7 +976,8 @@ impl IrisRuntime {
                                                     "{{\"sequence\":{},\"age_ms\":{},",
                                                     "\"width\":{},\"height\":{},",
                                                     "\"brightness\":{:.3},\"detail\":{:.3},",
-                                                    "\"motion\":{}}}"
+                                                    "\"motion\":{},\"motion_raw\":{},",
+                                                    "\"light_shift\":{}}}"
                                                 ),
                                                 slot.sequence,
                                                 age_ms,
@@ -989,8 +990,26 @@ impl IrisRuntime {
                                                 // different facts, and a caller
                                                 // thresholding on 0 would read
                                                 // the first as the second.
+                                                //
+                                                // `motion` is the LOCAL figure —
+                                                // the uniform component removed —
+                                                // because that is the one worth
+                                                // thresholding on. Auto-exposure
+                                                // moves the whole frame and would
+                                                // otherwise read as movement.
+                                                // `motion_raw` is kept beside it
+                                                // so the difference is visible
+                                                // rather than mysterious.
                                                 match sn.motion {
-                                                    Some(m) => format!("{m:.3}"),
+                                                    Some(m) => format!("{:.3}", m.local),
+                                                    None => "null".to_string(),
+                                                },
+                                                match sn.motion {
+                                                    Some(m) => format!("{:.3}", m.raw),
+                                                    None => "null".to_string(),
+                                                },
+                                                match sn.motion {
+                                                    Some(m) => format!("{:.3}", m.shift),
                                                     None => "null".to_string(),
                                                 }
                                             ),

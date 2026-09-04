@@ -13,6 +13,37 @@ the upgrade, so a published build would never reach anyone who already had one.
 `build_deb.sh` now refuses to build when the package version and the `iris-ui`
 crate version disagree.
 
+0.2.9 — 2026-09-04
+------------------
+`motion` now tells movement from a lighting change
+- **Auto-exposure looked exactly like movement**, and a plain mean-absolute
+  difference cannot tell them apart. Observed on hardware: opening the device
+  took brightness 79.8 → 114.3 over ~2s while raw motion tracked it to **10**,
+  with nothing moving. For an automation that is shouting at an empty room, or
+  drawing the curtains because a cloud passed.
+- **The separation is exact, not a heuristic.** If the whole frame shifts by
+  `k`, every per-pixel difference *is* `k`, so subtracting the mean difference
+  cancels it to zero. A subject moving changes a *region*: its differences are
+  large in a few places and near zero elsewhere, so the mean is small and almost
+  nothing cancels.
+- `/sense` now reports **`motion`** (uniform component removed — threshold on
+  this), **`motion_raw`** (kept beside it so the difference is visible rather
+  than mysterious) and **`light_shift`** (signed, so darkfall is distinguishable
+  from dawn).
+- **`motion` can read slightly above `motion_raw` on a still scene, and that is
+  correct** — sensor noise is roughly symmetric about zero, so removing a small
+  non-zero shift moves each difference further from it. Observed at raw 0.44,
+  motion 0.50, shift −0.15. Documented because it looks like a bug.
+- **What is not proven:** the motivating event was observed but could not be
+  reproduced on demand. Driving the camera's brightness control to its minimum
+  was accepted by the driver — readback confirmed −128 — and then compensated
+  away by the camera's own auto-exposure, moving the picture by 1.08. The
+  hardware test says so precisely rather than passing quietly.
+- **The camera guard is now in `iris-capture` too** — the third suite to need
+  it. Note its limit: cargo runs each crate's tests in a separate process, so a
+  `static Mutex` cannot serialise `iris-capture` against `iris-hal`. Run one
+  crate at a time when exercising hardware.
+
 0.2.8 — 2026-09-04
 ------------------
 `GET /sense` — brightness and motion, without waking a model

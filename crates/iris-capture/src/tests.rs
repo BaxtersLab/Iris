@@ -435,6 +435,152 @@ mod mjpeg_roi_tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod mjpeg_hardware_tests {
+    /// One camera, one test at a time — **within this binary**.
+    ///
+    /// Both hardware tests here open `/dev/video0` and call `VIDIOC_S_FMT`; a
+    /// second opener gets `Device or resource busy (os error 16)`. This is the
+    /// third crate to need this (iris-hal on Linux, the WMF suite on Windows,
+    /// now here), so treat it as the default for any suite that touches a real
+    /// device rather than something to rediscover.
+    ///
+    /// **Known limit:** cargo runs each crate's tests in its own **process**, so
+    /// this mutex cannot serialise `iris-capture` against `iris-hal`. With
+    /// `IRIS_USE_HW=1 cargo test --workspace` those two binaries can still
+    /// contend. Closing that properly needs a *file* lock — Iris already has one
+    /// in `single_instance` — and is not done here; run one crate at a time when
+    /// exercising hardware.
+    static CAMERA: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Poisoning means another test panicked, not that this one cannot run.
+    fn camera_guard() -> std::sync::MutexGuard<'static, ()> {
+        CAMERA.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Hardware: change the camera's **brightness control** — a uniform shift
+    /// with nothing moving — and confirm the discriminator calls it light
+    /// rather than motion.
+    ///
+    /// This is the case that motivated the correction, reproduced deliberately
+    /// instead of waited for. Auto-exposure produced it by accident on
+    /// 2026-09-04: opening the device took brightness 79.8 → 114.3 over ~2s
+    /// while raw motion tracked it to 10, with an empty, still room. Anything
+    /// thresholding on raw would have shouted at nobody.
+    ///
+    /// Driving the control gives the same shape on demand: the whole frame
+    /// changes, so `raw` and `shift` rise together while `local` stays at the
+    /// sensor-noise floor.
+    #[tokio::test]
+    async fn changing_camera_brightness_reads_as_light_not_motion() {
+        if std::env::var("IRIS_USE_HW").as_deref() != Ok("1") {
+            eprintln!("skipping changing_camera_brightness_reads_as_light_not_motion (set IRIS_USE_HW=1)");
+            return;
+        }
+        if !iris_hal::v4l2_backend::v4l2::V4l2UvcBackend::video_nodes_present() {
+            eprintln!("SKIP: IRIS_USE_HW=1 but no /dev/video* node exists — no camera attached");
+            return;
+        }
+        let _camera = camera_guard();
+        use iris_hal::backend::UvcBackend as _;
+        use iris_hal::v4l2_backend::v4l2::V4l2UvcBackend;
+        use crate::snapshot::{luma_plane, motion_detail, to_rgb24_for_tests};
+
+        const V4L2_CID_BRIGHTNESS: u32 = 0x0098_0900;
+
+        let backend = V4l2UvcBackend::new();
+        let devs = backend.enumerate_devices().await.expect("enumerate failed");
+        assert!(!devs.is_empty(), "no capture device present");
+        let id = devs[0].id.clone();
+
+        // Is brightness even adjustable here? A camera without it cannot
+        // demonstrate this, and saying so is better than a fabricated pass.
+        let controls = backend.list_controls(&id).await.unwrap_or_default();
+        let brightness = controls.iter().find(|c| c.id == V4L2_CID_BRIGHTNESS);
+        let Some(bc) = brightness else {
+            eprintln!("SKIP: this camera exposes no brightness control — cannot force a uniform shift");
+            return;
+        };
+        let original = backend.get_control(&id, V4L2_CID_BRIGHTNESS).await.unwrap_or(bc.default);
+        eprintln!("brightness control: {}..{} default {} now {}", bc.min, bc.max, bc.default, original);
+
+        backend.open_device(&id, None).await.expect("open failed");
+        // Let auto-exposure settle first, or its own ramp contaminates the test.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        async fn grab(
+            b: &V4l2UvcBackend,
+            id: &iris_hal::device::DeviceId,
+        ) -> (Vec<u8>, u32, u32) {
+            let raw = b.read_frame(id).await.expect("read_frame");
+            let f = b.current_format(id).await.unwrap().unwrap();
+            let frame = crate::frame::CaptureFrame {
+                sequence: 0,
+                width: f.width,
+                height: f.height,
+                format: f.pixel_format.clone(),
+                data: raw,
+                timestamp_us: crate::frame::CaptureFrame::now_us(),
+                is_cropped: false,
+            };
+            let (w, h, rgb) = to_rgb24_for_tests(&frame).expect("decode");
+            (luma_plane(&rgb, w, h), w, h)
+        }
+
+        let (before, w, h) = grab(&backend, &id).await;
+
+        // Drive brightness hard toward one end — a uniform change to every pixel.
+        let target = if (original - bc.min).abs() > (bc.max - original).abs() { bc.min } else { bc.max };
+        let set_ok = backend.set_control(&id, V4L2_CID_BRIGHTNESS, target).await.is_ok();
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let readback = backend
+            .get_control(&id, V4L2_CID_BRIGHTNESS)
+            .await
+            .unwrap_or(original);
+        eprintln!("  set {target} (ok={set_ok}), device now reports {readback}");
+
+        let (after, w2, h2) = grab(&backend, &id).await;
+
+        // Restore before asserting, so a failure does not leave the camera
+        // sitting at an extreme for the next test or the operator.
+        backend.set_control(&id, V4L2_CID_BRIGHTNESS, original).await.ok();
+        backend.close_device(&id).await.ok();
+
+        assert_eq!((w, h), (w2, h2), "geometry must not change mid-test");
+        let m = motion_detail(&after, &before).expect("same size");
+        eprintln!("  raw {:.3}   local {:.3}   shift {:.3}", m.raw, m.local, m.shift);
+
+        if m.raw < 2.0 {
+            // Distinguish the two reasons, because they are different facts and
+            // only one of them is about this camera's control surface.
+            if readback != target {
+                eprintln!(
+                    "SKIP: the driver refused the brightness change (asked {target}, \
+                     device reports {readback}) — cannot force a uniform shift here"
+                );
+            } else {
+                eprintln!(
+                    "SKIP: brightness was set to {target} and accepted, but the picture \
+                     moved only {:.3} — the camera's AUTO-EXPOSURE compensated for it. \
+                     Forcing a uniform shift on this device needs auto-exposure disabled \
+                     first (V4L2_CID_EXPOSURE_AUTO, camera class 0x009a09xx, which \
+                     list_controls does not scan).",
+                    m.raw
+                );
+            }
+            return;
+        }
+        assert!(
+            m.shift.abs() > m.local,
+            "a uniform brightness change must read mainly as light, not movement: \
+             raw {:.3} local {:.3} shift {:.3}",
+            m.raw, m.local, m.shift
+        );
+        assert!(
+            m.local < m.raw * 0.6,
+            "the correction must remove most of a uniform shift: raw {:.3} local {:.3}",
+            m.raw, m.local
+        );
+    }
+
     /// End-to-end: pull a real frame off the camera through the V4L2 backend
     /// and decode it. The fixture tests prove the decoder works on a 16x16
     /// image; this proves it works on what the hardware actually emits —
@@ -457,6 +603,7 @@ mod mjpeg_hardware_tests {
             );
             return;
         }
+        let _camera = camera_guard();
         use iris_hal::backend::UvcBackend as _;
         use iris_hal::device::PixelFormat;
         use iris_hal::v4l2_backend::v4l2::V4l2UvcBackend;

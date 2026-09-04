@@ -121,19 +121,40 @@ arithmetic gates the fallible part.
 | real camera, auto-exposure still ramping after open | 3 – 10 |
 | real camera, still scene, exposure settled | **~1.7 and falling** |
 
-**Auto-exposure registers as motion.** On opening the device, brightness climbed
-79.8 → 114.3 over roughly two seconds while `motion` tracked it up to 10 — with
-nothing moving in front of the lens. Anything thresholding on `motion` alone will
-false-alarm on every device open and every lighting change.
+**Auto-exposure registers as motion — and `/sense` now separates it for you.**
+On opening the device, brightness climbed 79.8 → 114.3 over roughly two seconds
+while raw motion tracked it up to 10, with nothing moving in front of the lens.
 
-Two ways to handle it, and the second is better:
+`motion` is therefore reported **with the uniform component removed**, and the
+separation is exact rather than a heuristic: if the whole frame shifts by `k`,
+every per-pixel difference *is* `k`, so subtracting the mean difference cancels
+it to zero. A subject moving changes a *region*, so its differences are large in
+a few places and near zero elsewhere — the mean is small and almost nothing
+cancels.
 
-* **ignore the first couple of seconds** after capture starts; or
-* **compare `motion` against the change in `brightness`.** An exposure shift
-  moves the *whole* frame roughly uniformly, so `motion` tracks `Δbrightness`; a
-  person moving changes a *region*, so `motion` rises while `brightness` barely
-  moves. In the settled samples above, brightness moved 0.007 between readings
-  while motion was 1.66 — those are trivially distinguishable.
+| field | rises on a lighting change | rises on movement |
+|---|---|---|
+| `motion` | **no** | yes |
+| `motion_raw` | yes | yes |
+| `light_shift` | yes (signed) | no |
+
+**Threshold on `motion`.** `motion_raw` is kept beside it so the difference is
+visible rather than mysterious, and `light_shift` is signed so darkfall is
+distinguishable from dawn.
+
+**`motion` can read slightly above `motion_raw` on a still scene, and that is
+correct.** Sensor noise is roughly symmetric about zero, so removing a small
+non-zero shift moves each difference further from zero on average — observed at
+`raw` 0.44, `motion` 0.50, `shift` −0.15. `motion` is a deviation about the
+shift, not a subset of `raw`.
+
+**What is proven, and what is not.** The separation is exact and unit-tested,
+including that a uniform ±34 shift yields `motion` < 0.01 while `raw` reports the
+full 34. The motivating event was *observed* on hardware (the ramp above), but it
+could not be reproduced on demand: driving the camera's brightness control to its
+minimum was accepted by the driver and then compensated away by the camera's own
+auto-exposure, moving the picture by only 1.08. Forcing it on that device would
+need auto-exposure disabled first.
 
 ## The integration contract
 
