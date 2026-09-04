@@ -47,6 +47,11 @@ pub struct Snapshot {
     /// and a detail metric taken at a resolution nobody consumes would be
     /// measuring the wrong thing.
     pub detail: f32,
+    /// Mean luma of the downscaled image, 0..255 — how bright the scene is.
+    ///
+    /// Reported because "is it dark?" deserves a number rather than an
+    /// inference. A real dark room measures around 10 on this hardware.
+    pub brightness: f32,
 }
 
 impl Snapshot {
@@ -68,6 +73,62 @@ pub enum SnapshotError {
     Truncated { actual: usize, expected: usize },
     #[error("jpeg encode failed: {0}")]
     Encode(String),
+}
+
+/// What the camera can report **without** a model: how bright, how detailed,
+/// and how much changed since the previous frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sense {
+    /// Working resolution these numbers were measured at.
+    pub width: u32,
+    pub height: u32,
+    /// Mean luma, 0..255. A real dark room reads about 10 on this hardware.
+    pub brightness: f32,
+    /// Luma standard deviation — 0 means a featureless frame. See `detail_score`.
+    pub detail: f32,
+    /// Mean absolute luma change against the comparison frame, 0..255.
+    ///
+    /// `None` when there is no comparison frame yet, or when the two differ in
+    /// size — a resolution change mid-stream is not motion, and reporting it as
+    /// motion would fire an alarm on a mode switch.
+    pub motion: Option<f32>,
+}
+
+/// The default working width for `sense`.
+///
+/// Small on purpose. This is the layer meant to run in a loop, so it must cost
+/// far less than the JPEG path: no encode, no base64, and a decode down to a
+/// thumbnail. Motion and brightness do not need resolution — a person entering
+/// a room moves thousands of pixels at 128 wide.
+pub const SENSE_WIDTH: u32 = 128;
+
+/// Measure a frame, optionally against an earlier one.
+///
+/// **Why this exists separately from `snapshot`.** `snapshot` encodes a JPEG and
+/// base64s it — tens of kilobytes and the wrong price to pay for "has anything
+/// changed?". The escalation this enables is brightness and motion by
+/// arithmetic, waking a vision model only once something has actually happened.
+/// Serving an image on every poll would defeat the point.
+pub fn sense(
+    frame: &CaptureFrame,
+    previous: Option<&CaptureFrame>,
+    work_width: u32,
+) -> Result<Sense, SnapshotError> {
+    let (w, h, rgb) = to_rgb24(frame)?;
+    let (dw, dh, scaled) = downscale_rgb24(&rgb, w, h, work_width);
+    let (brightness, detail) = luma_stats(&scaled, dw, dh);
+    let plane = luma_plane(&scaled, dw, dh);
+
+    // A failed decode of the PREVIOUS frame must not fail the whole call: the
+    // current frame's brightness and detail are still valid, and reporting
+    // "motion unknown" is honest where reporting an error would lose them.
+    let motion = previous.and_then(|prev| {
+        let (pw, ph, prgb) = to_rgb24(prev).ok()?;
+        let (pdw, pdh, pscaled) = downscale_rgb24(&prgb, pw, ph, work_width);
+        motion_score(&plane, &luma_plane(&pscaled, pdw, pdh))
+    });
+
+    Ok(Sense { width: dw, height: dh, brightness, detail, motion })
 }
 
 /// Convert any capture frame to RGB24, decoding MJPEG if needed.
@@ -243,9 +304,25 @@ fn to_rgb24(frame: &CaptureFrame) -> Result<(u32, u32, Vec<u8>), SnapshotError> 
 /// real picture. What is provable is the *absence* of variation, not the
 /// presence of a subject.
 pub fn detail_score(rgb: &[u8], width: u32, height: u32) -> f32 {
+    luma_stats(rgb, width, height).1
+}
+
+/// Mean and population standard deviation of BT.601 luma, in one pass.
+///
+/// **The mean is the useful half for anything ambient.** "Is it dark?" is a
+/// brightness question, not a vision question: it wants a number, not a
+/// 23-second inference that can hallucinate. Measured on this box, a real dark
+/// room reads a mean of **10** and a lit scene far higher, so a threshold
+/// answers it outright — and answers it correctly in the case that matters
+/// most, since the *synthetic* frame reads **130**, brighter than the real dark
+/// room. A model asked "is it dark" would have been wrong exactly when the
+/// camera failed; the number is right in both cases.
+///
+/// The standard deviation is the other half — see `detail_score`.
+pub fn luma_stats(rgb: &[u8], width: u32, height: u32) -> (f32, f32) {
     let n = (width as usize).saturating_mul(height as usize);
     if n == 0 || rgb.len() < n * 3 {
-        return 0.0;
+        return (0.0, 0.0);
     }
     let mut sum = 0.0f64;
     let mut sum_sq = 0.0f64;
@@ -261,7 +338,50 @@ pub fn detail_score(rgb: &[u8], width: u32, height: u32) -> f32 {
     // against every threshold and would silently serve the exact frame this
     // function exists to catch.
     let var = (sum_sq / n as f64 - mean * mean).max(0.0);
-    var.sqrt() as f32
+    (mean as f32, var.sqrt() as f32)
+}
+
+/// The luma plane, one byte per pixel, for comparing two frames.
+///
+/// Motion is a **two-frame** question and Iris is the only component holding
+/// more than one: the ring keeps recent frames and `read_by_age` already
+/// reaches them, but `/frame` has only ever served the newest. A vision model
+/// handed a single frame can see a person; it cannot see that the person moved.
+pub fn luma_plane(rgb: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let n = (width as usize).saturating_mul(height as usize);
+    if n == 0 || rgb.len() < n * 3 {
+        return Vec::new();
+    }
+    rgb.chunks_exact(3)
+        .take(n)
+        .map(|px| {
+            (0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32)
+                .clamp(0.0, 255.0) as u8
+        })
+        .collect()
+}
+
+/// Mean absolute luma difference between two frames, 0..255.
+///
+/// `None` when the planes differ in length — a resolution change mid-stream is
+/// not motion, and pretending otherwise would fire an alarm on a mode switch.
+///
+/// **Why the cheap layer must exist.** The escalation this enables is:
+/// brightness (one frame, arithmetic) → motion (two frames, arithmetic) → a
+/// vision model (23 seconds) only once something has actually moved. A model
+/// cannot be run in a polling loop asking "anything yet?", and one that
+/// invents a room from a blank field must never be what wakes an actuator or a
+/// speaker. The arithmetic layers gate the expensive, fallible one.
+pub fn motion_score(a: &[u8], b: &[u8]) -> Option<f32> {
+    if a.is_empty() || a.len() != b.len() {
+        return None;
+    }
+    let total: u64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| x.abs_diff(*y) as u64)
+        .sum();
+    Some(total as f32 / a.len() as f32)
 }
 
 /// Box-filter downscale to at most `max_width`, preserving aspect ratio.
@@ -394,7 +514,7 @@ pub fn snapshot(
     // Measured on the scaled pixels, before encoding: this is exactly the image
     // that reaches the model, and JPEG would add compression noise to a flat
     // field that is not information.
-    let detail = detail_score(&scaled, dw, dh);
+    let (brightness, detail) = luma_stats(&scaled, dw, dh);
 
     let mut jpeg = Vec::new();
     let encoder = jpeg_encoder::Encoder::new(&mut jpeg, quality.clamp(1, 100));
@@ -411,6 +531,7 @@ pub fn snapshot(
         width: dw,
         height: dh,
         detail,
+        brightness,
         mime: "image/jpeg",
         base64: base64_encode(&jpeg),
     })
@@ -837,6 +958,115 @@ mod tests {
         )
         .expect("uniform frames still encode");
         assert_eq!(blank.detail, 0.0, "a blank snapshot must report zero detail");
+    }
+
+    // ---- brightness and motion: the cheap layer -----------------------------
+    //
+    // The escalation these enable: brightness (one frame, arithmetic) → motion
+    // (two frames, arithmetic) → a vision model (23 seconds) only once
+    // something has actually moved. A model cannot be polled in a loop, and one
+    // that invents a room from a blank field must never be what wakes an
+    // actuator or a speaker.
+
+    /// Brightness must be the mean, and it must separate the cases that matter.
+    ///
+    /// Measured on this box: a real **dark room** reads about 10, while the
+    /// **synthetic** frame reads 130 — the failed camera is *brighter* than the
+    /// real dark one. Anything deciding "is it dark" from a model's opinion
+    /// would have been wrong exactly when the camera broke; the number is right
+    /// in both cases.
+    #[test]
+    fn brightness_is_the_mean_and_separates_dark_from_blank() {
+        let black = luma_stats(&vec![0u8; 64 * 64 * 3], 64, 64).0;
+        let grey = luma_stats(&vec![130u8; 64 * 64 * 3], 64, 64).0;
+        let white = luma_stats(&vec![255u8; 64 * 64 * 3], 64, 64).0;
+        assert!(black < 1.0, "black is dark, got {black}");
+        assert!((grey - 130.0).abs() < 1.0, "mid grey is ~130, got {grey}");
+        assert!(white > 254.0, "white is bright, got {white}");
+        assert!(
+            grey > black,
+            "the synthetic frame reads BRIGHTER than a dark room — the case that \
+             makes a brightness number better than an opinion"
+        );
+    }
+
+    /// Identical frames are not motion. This is the assertion that stops an
+    /// automation firing on a still room.
+    #[test]
+    fn identical_frames_report_no_motion() {
+        let a = luma_plane(&vec![90u8; 32 * 32 * 3], 32, 32);
+        let b = a.clone();
+        assert_eq!(motion_score(&a, &b), Some(0.0));
+    }
+
+    /// Something moving must register, and the magnitude must scale with how
+    /// much changed — a threshold is worthless if every change reads the same.
+    #[test]
+    fn a_change_registers_in_proportion_to_its_size() {
+        let base = vec![50u8; 32 * 32];
+        let mut small = base.clone();
+        for p in small.iter_mut().take(32) {
+            *p = 200; // one row of 32x32
+        }
+        let mut large = base.clone();
+        for p in large.iter_mut().take(32 * 16) {
+            *p = 200; // half the frame
+        }
+        let m_small = motion_score(&base, &small).expect("same size");
+        let m_large = motion_score(&base, &large).expect("same size");
+        assert!(m_small > 0.0, "a change must register, got {m_small}");
+        assert!(
+            m_large > m_small * 4.0,
+            "a bigger change must read bigger: {m_small} vs {m_large}"
+        );
+    }
+
+    /// A resolution change is not motion. Reporting it as motion would fire an
+    /// alarm every time the camera renegotiated its mode.
+    #[test]
+    fn a_resolution_change_is_not_motion() {
+        let a = luma_plane(&vec![90u8; 32 * 32 * 3], 32, 32);
+        let b = luma_plane(&vec![90u8; 16 * 16 * 3], 16, 16);
+        assert_eq!(
+            motion_score(&a, &b),
+            None,
+            "differently sized frames are incomparable, not 'moving'"
+        );
+    }
+
+    /// With no earlier frame, motion is **unknown** rather than zero.
+    ///
+    /// A caller thresholding on `motion < 1.0` would read "no comparison frame
+    /// yet" as "nothing moved" — the two are different facts and the first
+    /// happens on every cold start.
+    #[test]
+    fn the_first_frame_reports_unknown_motion_not_zero() {
+        let f = frame(64, 64, PixelFormat::Rgb24, vec![120; 64 * 64 * 3]);
+        let sn = sense(&f, None, 32).expect("sense must work on a first frame");
+        assert_eq!(sn.motion, None, "unknown, not zero");
+        assert!(sn.brightness > 100.0, "brightness is still measured: {}", sn.brightness);
+    }
+
+    /// `sense` decodes and downscales both frames and reports the difference.
+    #[test]
+    fn sense_measures_change_between_two_real_frames() {
+        let dark = frame(64, 64, PixelFormat::Rgb24, vec![20; 64 * 64 * 3]);
+        let mut lit_px = vec![20u8; 64 * 64 * 3];
+        for p in lit_px.iter_mut().take(64 * 32 * 3) {
+            *p = 200;
+        }
+        let lit = frame(64, 64, PixelFormat::Rgb24, lit_px);
+
+        let still = sense(&dark, Some(&dark), 32).expect("sense");
+        assert_eq!(still.motion, Some(0.0), "an unchanged scene is not motion");
+
+        let changed = sense(&lit, Some(&dark), 32).expect("sense");
+        let m = changed.motion.expect("two comparable frames");
+        assert!(m > 50.0, "half the frame changing should read large, got {m}");
+        assert!(
+            changed.brightness > still.brightness,
+            "the lit frame must also read brighter"
+        );
     }
 
     #[test]

@@ -610,6 +610,44 @@ verified removed (`diff -rq` clean, no patch returned).
       which needs no per-format knowledge. The round-6 probe hit this and caught
       it before reporting a phantom defect in the one format that round was about.
 
+## Ambient sensing — `/sense`, added 2026-09-04
+
+`GET /sense` returns `brightness`, `detail` and `motion` with **no image**: the
+cheap layer of brightness → motion → model, so a vision model is woken rather
+than polled. Documented in `docs/AGENT_VISION.md`.
+
+- [x] **`motion` is the first thing in Iris that reads two frames.** `/frame`
+      only ever called `read_latest()`, so "did something move" was
+      unanswerable — a model handed a single frame can see a person but not that
+      the person moved. The ring already held the history and `read_by_age` was
+      already there; nothing used it.
+
+      Measured live: the synthetic backend reads **0.000** exactly (frames
+      identical by construction, which is what proves the diff reads real pixel
+      data), and a still real scene settles toward **~1.7**.
+
+- [ ] **Auto-exposure registers as motion — the caveat anyone building on this
+      must know.** On opening the device, brightness climbed **79.8 → 114.3**
+      over ~2s while `motion` tracked it to **10**, with nothing moving. A naive
+      threshold false-alarms on every device open and every lighting change.
+
+      The discriminator is already available and costs nothing: an exposure
+      shift moves the whole frame roughly uniformly so `motion` tracks
+      `Δbrightness`, while a person moving changes a region so `motion` rises
+      with `brightness` almost still. In the settled samples brightness moved
+      **0.007** between readings while motion was **1.66**. Either implement
+      that comparison in Iris or state it as the caller's job — currently it is
+      documented and unimplemented.
+
+- [ ] **Direction (operator, 2026-09-04): Iris as a Chatbox dependency feeding
+      ambient automation.** A smart power strip actuated from what the model
+      sees — draw curtains at darkfall, then turn on a lamp; notice movement and
+      speak. The hardware is not being added yet, but it constrains the API:
+      **the arithmetic layers own the trigger and the model stays advisory**,
+      because a model that invents a room from a blank frame would shout at an
+      empty one — and would be most confident exactly when the lens is covered,
+      since the failed frame reads brighter (130) than a real dark room (10).
+
 ## Agent vision — the integration contract, decided 2026-09-03
 
 **The harness attaches the frame; the model does not fetch it.** Written up in

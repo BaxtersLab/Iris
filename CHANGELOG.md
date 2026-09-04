@@ -13,6 +13,35 @@ the upgrade, so a published build would never reach anyone who already had one.
 `build_deb.sh` now refuses to build when the package version and the `iris-ui`
 crate version disagree.
 
+0.2.8 — 2026-09-04
+------------------
+`GET /sense` — brightness and motion, without waking a model
+- **`motion` is the first thing in Iris that reads two frames.** `/frame` only
+  ever called `read_latest()`, so "did something move" was unanswerable: a model
+  handed a single frame can see a person but not that the person moved. The ring
+  already held the history and `read_by_age` already existed; nothing used it.
+- **`/sense` returns numbers and no image** — no JPEG encode, no base64, a 128px
+  working width. It is the layer meant to run in a loop, so brightness →
+  motion → model escalates, and the model is *woken* rather than polled. A
+  vision model cannot answer "anything yet?" thirty times a minute; arithmetic
+  can.
+- **`brightness` is mean luma**, already computed inside `detail_score` and
+  previously discarded. "Is it dark?" is a number, not an inference — and the
+  number is right in the case that matters most, since the *synthetic* frame
+  reads 130 while a real dark room reads 10. A model asked the same question
+  would have been wrong exactly when the camera failed.
+- **`motion` is `null`, never `0`, when there is no comparison frame**, and also
+  when the two frames differ in size. "No earlier frame yet" and "nothing moved"
+  are different facts; a mode renegotiation is not movement.
+- **Measured live:** the synthetic backend reads **0.000** exactly — frames
+  identical by construction, which is what proves the diff reads real pixel
+  data — and a still real scene settles toward **~1.7**.
+- **Known caveat, documented not fixed: auto-exposure registers as motion.** On
+  opening the device, brightness climbed 79.8 → 114.3 over ~2s while motion
+  tracked it to 10, with nothing moving. The discriminator costs nothing and is
+  described in `AGENT_VISION.md`: an exposure shift moves the whole frame so
+  motion tracks Δbrightness, while a person moving changes a region.
+
 0.2.7 — 2026-09-03
 ------------------
 `/frame` refuses a frame that carries no detail

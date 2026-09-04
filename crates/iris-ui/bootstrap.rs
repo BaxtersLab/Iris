@@ -909,6 +909,107 @@ impl IrisRuntime {
                                     .unwrap(),
                             )
                         }
+                        // The cheap layer: numbers, no image.
+                        //
+                        // `/frame` encodes a JPEG and base64s it — tens of
+                        // kilobytes, and the wrong price for "has anything
+                        // changed?". This is what a loop polls: brightness and
+                        // detail from the newest frame, and motion against an
+                        // earlier one from the ring. A vision model gets woken
+                        // only once these say something happened.
+                        //
+                        // Motion is the reason this endpoint exists at all.
+                        // `/frame` reads only `read_latest`, so nothing in Iris
+                        // has ever compared two frames — and a model handed a
+                        // single frame can see a person but not that the person
+                        // moved.
+                        "/sense" => {
+                            let q = req.uri().query().unwrap_or("");
+                            let param = |k: &str| -> Option<u64> {
+                                q.split('&')
+                                    .filter_map(|kv| kv.split_once('='))
+                                    .find(|(name, _)| *name == k)
+                                    .and_then(|(_, v)| v.parse().ok())
+                            };
+                            let work_width = param("width")
+                                .unwrap_or(iris_capture::snapshot::SENSE_WIDTH as u64)
+                                as u32;
+                            // How far back to compare. 1 = the previous frame.
+                            let back = param("back").unwrap_or(1).max(1) as usize;
+
+                            let (latest, prev) = match http_frames.lock() {
+                                Ok(rb) => (rb.read_latest().cloned(), rb.read_by_age(back).cloned()),
+                                Err(_) => (None, None),
+                            };
+                            let (status, body) = match latest {
+                                None => (
+                                    503,
+                                    "{\"error\":\"no frame captured yet — is capture running?\"}"
+                                        .to_string(),
+                                ),
+                                Some(slot) => {
+                                    let age_ms = iris_capture::frame::CaptureFrame::now_us()
+                                        .saturating_sub(slot.timestamp_us)
+                                        / 1_000;
+                                    let to_frame = |s: &iris_stream::ring_buffer::RingSlot| {
+                                        iris_capture::frame::CaptureFrame {
+                                            sequence: s.sequence,
+                                            width: s.width,
+                                            height: s.height,
+                                            format: s.format.clone(),
+                                            data: s.data.clone(),
+                                            timestamp_us: s.timestamp_us,
+                                            is_cropped: false,
+                                        }
+                                    };
+                                    let cur = to_frame(&slot);
+                                    let earlier = prev.as_ref().map(to_frame);
+                                    match iris_capture::snapshot::sense(
+                                        &cur,
+                                        earlier.as_ref(),
+                                        work_width,
+                                    ) {
+                                        Ok(sn) => (
+                                            200,
+                                            format!(
+                                                concat!(
+                                                    "{{\"sequence\":{},\"age_ms\":{},",
+                                                    "\"width\":{},\"height\":{},",
+                                                    "\"brightness\":{:.3},\"detail\":{:.3},",
+                                                    "\"motion\":{}}}"
+                                                ),
+                                                slot.sequence,
+                                                age_ms,
+                                                sn.width,
+                                                sn.height,
+                                                sn.brightness,
+                                                sn.detail,
+                                                // `null`, not 0: "no comparison
+                                                // frame" and "nothing moved" are
+                                                // different facts, and a caller
+                                                // thresholding on 0 would read
+                                                // the first as the second.
+                                                match sn.motion {
+                                                    Some(m) => format!("{m:.3}"),
+                                                    None => "null".to_string(),
+                                                }
+                                            ),
+                                        ),
+                                        Err(e) => (
+                                            500,
+                                            format!("{{\"error\":\"sense failed: {e}\"}}"),
+                                        ),
+                                    }
+                                }
+                            };
+                            Ok::<_, Infallible>(
+                                Response::builder()
+                                    .status(status)
+                                    .header("content-type", "application/json")
+                                    .body(Body::from(body))
+                                    .unwrap(),
+                            )
+                        }
                         "/metrics" => {
                             let body = prometheus_text();
                             Ok::<_, Infallible>(

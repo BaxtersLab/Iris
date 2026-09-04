@@ -74,6 +74,67 @@ Every successful answer carries **`age_ms`** — how old the frame was when it w
 served, computed here so no caller has to reason about clock skew. `captured_us`
 is the absolute capture time if you want it.
 
+## `GET /sense` — numbers, without a model
+
+`/frame` encodes a JPEG and base64s it: tens of kilobytes, and the wrong price
+for *"has anything changed?"*. `/sense` answers that in arithmetic.
+
+```json
+{"sequence":11,"age_ms":44,"width":128,"height":72,
+ "brightness":114.254,"detail":97.984,"motion":1.660}
+```
+
+| field | meaning |
+|---|---|
+| `brightness` | Mean luma, 0..255. A dark room reads ~10 on this hardware. |
+| `detail` | Luma standard deviation — 0 means a featureless frame. |
+| `motion` | Mean absolute luma change against an earlier ring frame, or **`null`**. |
+| `width` / `height` | Working resolution (default 128 wide; `?width=` overrides). |
+
+`?back=N` chooses how far back to compare (default 1 = the previous frame).
+
+**`motion` is `null`, never `0`, when there is no comparison frame.** "No
+earlier frame yet" and "nothing moved" are different facts, and a caller
+thresholding on `motion < 2` would read a cold start as a still room. A
+resolution change also yields `null` — a mode renegotiation is not movement.
+
+### The escalation this is for
+
+```
+  brightness   1 frame,  arithmetic   is it dark?        → curtains, lamp
+  motion       2 frames, arithmetic   did something move? → wake the model
+  vision model 1 frame,  ~23s CPU     what/who is it?     → speak, decide
+```
+
+**The point is that the model runs only when the cheap layers say something
+happened.** A vision model cannot be polled in a loop asking "anything yet?" —
+but frames can be diffed all day. This is also the safety boundary: a model that
+[invents a room from a blank field](#a-served-frame-is-not-a-guarantee-of-visible-content)
+must never be the thing that moves an actuator or opens a speaker. The
+arithmetic gates the fallible part.
+
+### Measured, and the caveat that matters
+
+| condition | `motion` |
+|---|---|
+| synthetic backend — frames identical by construction | **0.000** exactly |
+| real camera, auto-exposure still ramping after open | 3 – 10 |
+| real camera, still scene, exposure settled | **~1.7 and falling** |
+
+**Auto-exposure registers as motion.** On opening the device, brightness climbed
+79.8 → 114.3 over roughly two seconds while `motion` tracked it up to 10 — with
+nothing moving in front of the lens. Anything thresholding on `motion` alone will
+false-alarm on every device open and every lighting change.
+
+Two ways to handle it, and the second is better:
+
+* **ignore the first couple of seconds** after capture starts; or
+* **compare `motion` against the change in `brightness`.** An exposure shift
+  moves the *whole* frame roughly uniformly, so `motion` tracks `Δbrightness`; a
+  person moving changes a *region*, so `motion` rises while `brightness` barely
+  moves. In the settled samples above, brightness moved 0.007 between readings
+  while motion was 1.66 — those are trivially distinguishable.
+
 ## The integration contract
 
 Decided 2026-09-03 by measurement, not preference. **The harness attaches the
