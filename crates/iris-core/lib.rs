@@ -47,6 +47,35 @@ mod tests {
         assert!(cfg.validate().is_err());
     }
 
+    /// **A field nothing reads must not be able to refuse a startup.**
+    ///
+    /// `ui.preview_scale` was range-checked while no code outside this crate
+    /// ever read it, so a config could be rejected over a value that would then
+    /// have been ignored. That is strictly worse than an inert setting: it turns
+    /// a knob that does nothing into a way to fail. Pinned so the check is not
+    /// restored before the behaviour is.
+    #[test]
+    fn an_unhonoured_field_cannot_refuse_a_startup() {
+        let mut cfg = crate::config::IrisConfig::default();
+        cfg.ui.preview_scale = 99.0;
+        assert!(
+            cfg.validate().is_ok(),
+            "preview_scale reaches no code, so it must not be able to reject a config"
+        );
+    }
+
+    /// The converse: a field that IS honoured stays validated. `logging.level`
+    /// now actually sets the filter, so rejecting a nonsense value is correct.
+    #[test]
+    fn an_honoured_field_is_still_validated() {
+        let mut cfg = crate::config::IrisConfig::default();
+        cfg.logging.level = "shout".to_string();
+        assert!(
+            cfg.validate().is_err(),
+            "logging.level is honoured now, so a bad value must still be refused"
+        );
+    }
+
     #[test]
     fn test_config_validation_invalid_pixel_format() {
         let mut cfg = IrisConfig::default();

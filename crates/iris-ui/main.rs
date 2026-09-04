@@ -1,11 +1,5 @@
 #[tokio::main]
 async fn main() {
-    // Initialize logging from `RUST_LOG` (so debug output reaches stdout)
-    let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
-    if let Err(e) = iris_core::logging::init_logging(&log_level, false, ".") {
-        eprintln!("failed to init logging: {}", e);
-    }
-
     // Load `iris.toml` (next to the executable) if present, else fall back to
     // defaults. Previously this called `IrisConfig::default()` unconditionally,
     // so the whole config-file mechanism — `IrisConfig::load()`/`save()`/
@@ -33,6 +27,24 @@ async fn main() {
             iris_core::config::IrisConfig::default()
         }
     };
+    // Logging is initialised AFTER the config is read, which is the whole point:
+    // it was previously initialised first, from `RUST_LOG` alone, so
+    // `logging.level`, `logging.log_to_file` and `logging.log_dir` reached
+    // nothing — while `validate()` above rejected the entire config if
+    // `logging.level` was not a known level. Iris refused to start over a value
+    // it would never read.
+    //
+    // `RUST_LOG` still wins when set; the config supplies the default. Errors
+    // before this point necessarily use `eprintln!`, because there is no
+    // subscriber yet.
+    if let Err(e) = iris_core::logging::init_logging(
+        &cfg.logging.level,
+        cfg.logging.log_to_file,
+        &cfg.logging.log_dir,
+    ) {
+        eprintln!("failed to init logging: {}", e);
+    }
+
     // One Iris at a time. Checked BEFORE bootstrap so a refused instance never
     // opens the camera, never binds the metrics port, and never starts a
     // capture thread it is about to throw away.
@@ -62,6 +74,10 @@ async fn main() {
         }
     };
 
+    // Read before `cfg` moves into bootstrap. `ui.show_telemetry_panel` reached
+    // nothing before 2026-09-04: serialised and validated, while the Activity
+    // strip was drawn unconditionally.
+    let show_telemetry_panel = cfg.ui.show_telemetry_panel;
     match iris_ui::bootstrap::IrisRuntime::bootstrap(cfg).await {
         Ok(_rt) => {
             // Keep runtime alive while UI runs; pass the IPC handle into the UI so it can send commands and subscribe to telemetry.
@@ -184,6 +200,7 @@ async fn main() {
                         capture_handle,
                         control_handle.clone(),
                         mirror.clone(),
+                        show_telemetry_panel,
                     ))
                 }),
             );

@@ -152,6 +152,15 @@ pub enum TelemetryEvent {
         total_overwritten: u64,
     },
 
+    /// Emitted once per second when a rate ceiling discarded events.
+    ///
+    /// A limiter that silently drops turns a busy system into one that looks
+    /// idle. This is sent **outside** the budget it reports on, or the message
+    /// about dropping would itself be dropped.
+    TelemetryRateLimited {
+        dropped: u64,
+    },
+
     HealthCheck {
         cpu_percent: f32,
         memory_mb: f32,

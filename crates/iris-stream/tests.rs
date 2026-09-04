@@ -175,6 +175,74 @@ async fn feed(h: &Harness, n: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(60)).await;
 }
 
+// ---- telemetry policy ----------------------------------------------------
+//
+// `telemetry.enabled` and `telemetry.max_events_per_second` were serialised,
+// documented and **validated** by `iris-core`, and no code outside that crate
+// ever read either. Setting `enabled = false` left telemetry running at full
+// rate. These pin the wiring.
+
+/// A harness with the telemetry policy applied, as bootstrap does.
+fn harness_policy(enabled: bool, max_per_sec: u32) -> Harness {
+    let (frame_tx, frame_rx) = mpsc::channel(16);
+    let (tel_tx, telemetry) = broadcast::channel(256);
+    let (mut svc, handle) =
+        StreamService::with_recycle_interval(frame_rx, tel_tx, StreamMode::Pull, 2, 8,
+                                             std::time::Duration::ZERO);
+    svc.set_telemetry_policy(enabled, max_per_sec);
+    tokio::spawn(svc.run());
+    Harness { frame_tx, handle, telemetry }
+}
+
+/// `enabled = false` must silence telemetry completely.
+#[tokio::test]
+async fn telemetry_disabled_emits_nothing() {
+    let mut h = harness_policy(false, 0);
+    feed(&h, 8).await;
+    assert!(
+        drain(&mut h.telemetry).is_empty(),
+        "enabled=false must emit nothing at all"
+    );
+}
+
+/// `enabled = true` with no ceiling is the previous behaviour, unchanged.
+#[tokio::test]
+async fn telemetry_enabled_with_no_ceiling_is_unrestricted() {
+    let mut h = harness_policy(true, 0);
+    feed(&h, 8).await;
+    assert!(
+        !recycles(&mut h.telemetry).is_empty(),
+        "0 means unlimited, not 'emit nothing'"
+    );
+}
+
+/// A ceiling must bound emission — **and report what it discarded**.
+///
+/// A limiter that silently drops turns a busy system into one that looks idle,
+/// which is the same class of failure as a camera returning a blank frame
+/// instead of an error.
+#[tokio::test]
+async fn a_ceiling_bounds_emission_and_reports_the_loss() {
+    let mut h = harness_policy(true, 2);
+    feed(&h, 12).await; // far more overwrites than the ceiling allows
+
+    let events = drain(&mut h.telemetry);
+    assert!(
+        events.len() <= 3,
+        "a ceiling of 2/s must bound emission, got {} events",
+        events.len()
+    );
+
+    // Let the window roll so the drop report is emitted.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    feed(&h, 4).await;
+    let after = drain(&mut h.telemetry);
+    assert!(
+        after.iter().any(|e| matches!(e, TelemetryEvent::TelemetryRateLimited { dropped } if *dropped > 0)),
+        "the limiter must say how much it discarded, got {after:?}"
+    );
+}
+
 // ---- ring recycling telemetry --------------------------------------------
 //
 // Until 2026-09-01 this event was `RingBufferOverflow { dropped_frames }`, it

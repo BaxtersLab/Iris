@@ -24,6 +24,11 @@ pub struct IrisConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeviceConfig {
+    // NOT YET HONOURED — `auto_reconnect`, `max_reconnect_attempts` and
+    // `reconnect_delay_ms`. There is no reconnection logic to configure: a
+    // device lost mid-capture stays lost. Building that is a feature with its
+    // own failure modes (a camera reappearing as a different node, a retry loop
+    // that pins a CPU), so it is declared rather than guessed at.
     pub preferred_device: String,
     pub auto_reconnect: bool,
     pub max_reconnect_attempts: u32,
@@ -58,6 +63,10 @@ pub struct StreamConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TelemetryConfig {
+    // `enabled` and `max_events_per_second` ARE honoured as of 0.2.11.
+    // NOT YET HONOURED — `output_mode` and `file_path`: telemetry is broadcast
+    // in-process and there is no file sink. Writing one is a feature, not
+    // wiring, so it is declared rather than half-built.
     pub enabled: bool,
     pub output_mode: String,
     pub file_path: String,
@@ -66,6 +75,11 @@ pub struct TelemetryConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiConfig {
+    // NOT YET HONOURED — `show_on_start` and `preview_scale` reach nothing.
+    // The window is adaptive and always shown, so neither has a behaviour to
+    // attach to yet; `show_diagnostics_panel` has no panel to gate at all.
+    // Declared here rather than left silent (Article VII), and deliberately not
+    // range-checked in `validate` — see the note there.
     pub show_on_start: bool,
     pub preview_scale: f32,
     pub show_telemetry_panel: bool,
@@ -299,9 +313,12 @@ impl IrisConfig {
                 "max_subscribers must be >= 1".to_string(),
             ));
         }
-        if !(self.ui.preview_scale > 0.0 && self.ui.preview_scale <= 2.0) {
-            return Err(IrisError::Config("preview_scale out of range".to_string()));
-        }
+        // `ui.preview_scale` is deliberately NOT validated.
+        //
+        // It used to be, and nothing read it — so Iris refused to start over a
+        // value it would never use. Validating a field that has no behaviour is
+        // worse than leaving it alone: it converts an inert setting into a way
+        // to fail. Re-add this check when the field actually scales something.
         let levels = ["trace", "debug", "info", "warn", "error"];
         if !levels.contains(&self.logging.level.as_str()) {
             return Err(IrisError::Config("logging.level invalid".to_string()));

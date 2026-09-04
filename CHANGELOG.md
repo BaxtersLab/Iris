@@ -13,6 +13,42 @@ the upgrade, so a published build would never reach anyone who already had one.
 `build_deb.sh` now refuses to build when the package version and the `iris-ui`
 crate version disagree.
 
+0.2.11 — 2026-09-04
+-------------------
+Seven config fields that did nothing now do something; the rest are declared
+- **A sweep of every config field found 14 that reached no code outside
+  `iris-core`** — the fourth and largest instance of a shape this project has
+  fixed three times (`pixel_format`, `width`/`height`, `target_fps`).
+- **`logging.level` was the sharpest.** Logging was initialised from `RUST_LOG`
+  *before the config was even loaded*, so the field reached nothing — while
+  `validate()` **rejected the whole config** if it was not a known level. Iris
+  refused to start over a value it would never read. Config is now loaded first
+  and logging initialised from it, with `RUST_LOG` still winning when set.
+- **`logging.log_to_file` created a directory and no file.** The body said
+  "detailed file logging will be added in integration", so the switch produced
+  an empty folder — indistinguishable from working until someone looked. It now
+  writes `<log_dir>/iris.log`, appended and without ANSI.
+- **`telemetry.enabled` and `telemetry.max_events_per_second` are honoured.**
+  `enabled = false` previously left telemetry running at full rate. The ceiling
+  **reports what it discarded** once per window, because a limiter that silently
+  drops turns a busy system into one that looks idle.
+- **`ui.show_telemetry_panel`** gates the Activity strip, which was drawn
+  unconditionally.
+- **`controls.default_profile`** is applied at startup. `load_profile` had
+  existed in `iris-control` since the crate was built with no caller — saving a
+  profile worked and it was never applied.
+- **`ui.preview_scale` is no longer validated.** It was range-checked while
+  nothing read it, so a config could be refused over a value that would then be
+  ignored — strictly worse than an inert setting, because it turns a knob that
+  does nothing into a way to fail. A test pins that rule, and its converse: a
+  field that *is* honoured stays validated.
+- **The remaining eight are declared in the struct definitions**, not left
+  silent: `ui.show_on_start` / `preview_scale` / `show_diagnostics_panel` (no
+  panel exists to gate), `telemetry.output_mode` / `file_path` (no file sink),
+  and `device.auto_reconnect` / `max_reconnect_attempts` / `reconnect_delay_ms`
+  (no reconnection logic). Each is a feature with its own failure modes, so it
+  is declared rather than half-built.
+
 0.2.10 — 2026-09-04
 -------------------
 One camera, one holder — across processes

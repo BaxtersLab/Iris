@@ -239,6 +239,10 @@ pub fn frame_to_rgba(frame: &CaptureFrame) -> Vec<u8> {
 }
 
 pub struct IrisApp {
+    /// `ui.show_telemetry_panel`. Reached nothing before 2026-09-04: the field
+    /// was serialised and validated while the Activity strip was drawn
+    /// unconditionally.
+    show_telemetry_panel: bool,
     ipc: Arc<IpcHandle>,
     telemetry_rx: Mutex<LoggedTelemetryReceiver>,
     log: Arc<Mutex<Vec<String>>>,
@@ -290,9 +294,11 @@ impl IrisApp {
         capture: CaptureHandle,
         control: Option<iris_control::ControlHandle>,
         mirror: Arc<std::sync::atomic::AtomicBool>,
+        show_telemetry_panel: bool,
     ) -> Self {
         let telemetry_rx = ipc.subscribe_telemetry();
         let app = Self {
+            show_telemetry_panel,
             ipc: ipc.clone(),
             telemetry_rx: Mutex::new(telemetry_rx),
             log: Arc::new(Mutex::new(Vec::new())),
@@ -885,6 +891,10 @@ impl eframe::App for IrisApp {
         //
         // Panels are laid out in the order they are declared, so the strip
         // (declared first) sits at the very bottom and this sits on top of it.
+        // Gated by `ui.show_telemetry_panel`. Hiding it does not stop telemetry
+        // being collected — `[telemetry] enabled` governs that — it only stops
+        // the window devoting space to it.
+        if self.show_telemetry_panel {
         TopBottomPanel::bottom("activity_strip").show(ctx, |ui| {
             ui.add_space(1.0);
             ui.horizontal(|ui| {
@@ -914,6 +924,7 @@ impl eframe::App for IrisApp {
             }
             ui.add_space(1.0);
         });
+        }
 
         // Everything left over is the preview.
         CentralPanel::default().show(ctx, |ui| {

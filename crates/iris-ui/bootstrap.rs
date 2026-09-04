@@ -669,6 +669,15 @@ impl IrisRuntime {
             config.stream.ring_buffer_capacity.max(2),
             config.stream.max_subscribers.max(1),
         );
+        // `[telemetry]` from the config, which reached nothing before 2026-09-04:
+        // `enabled` and `max_events_per_second` were serialised, documented and
+        // validated, and no code outside `iris-core` read either. Setting
+        // `enabled = false` left telemetry running at full rate.
+        let mut stream_service = stream_service;
+        stream_service.set_telemetry_policy(
+            config.telemetry.enabled,
+            config.telemetry.max_events_per_second,
+        );
         if stream_mode == iris_stream::StreamMode::Pull {
             // Not overridden — the config is honoured — but said plainly,
             // because the symptom is a permanently empty preview with a
@@ -1301,6 +1310,33 @@ impl IrisRuntime {
         // profiles directory sits beside the config so a profile is findable
         // next to the settings it belongs with.
         let control_handle = Self::spawn_control_service(&config, telemetry_tx.clone());
+
+        // `controls.default_profile`, which reached nothing before 2026-09-04:
+        // the field was serialised and documented while `load_profile` — which
+        // has existed in `iris-control` since the crate was built — had no
+        // caller at startup. Saving a profile worked and it was never applied.
+        //
+        // A failure is reported and not fatal: a missing or corrupt profile
+        // should not stop the camera coming up, and saying so is better than a
+        // silent fall-through to whatever the device happened to hold.
+        if !config.controls.default_profile.trim().is_empty() {
+            if let Some(handle) = &control_handle {
+                let name = config.controls.default_profile.clone();
+                match handle.load_profile(&name).await {
+                    Ok(n) => tracing::info!("applied control profile '{name}' ({n} controls)"),
+                    Err(e) => tracing::warn!(
+                        "control profile '{name}' could not be applied ({e}); \
+                         the camera keeps its current settings"
+                    ),
+                }
+            } else {
+                tracing::warn!(
+                    "controls.default_profile is set to '{}' but no control service is \
+                     running, so it cannot be applied",
+                    config.controls.default_profile
+                );
+            }
+        }
 
         Ok(Self {
             app_state,

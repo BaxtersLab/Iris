@@ -75,6 +75,16 @@ pub struct StreamService {
     overwrites_reported: u64,
     /// When the last `RingBufferRecycled` went out. `None` until the first.
     last_recycle_report: Option<Instant>,
+    /// `telemetry.enabled`: when false, nothing is emitted at all.
+    telemetry_enabled: bool,
+    /// `telemetry.max_events_per_second`: a ceiling on emission, 0 = unlimited.
+    max_events_per_second: u32,
+    /// Start of the current one-second budget window, and what has been spent.
+    budget_started: Option<Instant>,
+    budget_spent: u32,
+    /// Events dropped in the current window, reported once when it rolls over
+    /// so a silent gap is never mistaken for a quiet system.
+    budget_dropped: u64,
     /// Minimum gap between `RingBufferRecycled` events.
     ///
     /// Without this the event fires on **every frame** once the ring is full,
@@ -145,6 +155,11 @@ impl StreamService {
             total_dropped: 0,
             max_subscribers,
             subscriber_queue_depth: 4,
+            telemetry_enabled: true,
+            max_events_per_second: 0,
+            budget_started: None,
+            budget_spent: 0,
+            budget_dropped: 0,
             overwrites_reported: 0,
             last_recycle_report: None,
             recycle_report_interval,
@@ -190,7 +205,64 @@ impl StreamService {
         });
     }
 
+    /// Apply `[telemetry]` from the config.
+    ///
+    /// Both fields reached nothing before 2026-09-04: `enabled` and
+    /// `max_events_per_second` were serialised, documented and validated, and no
+    /// code outside `iris-core` ever read them. Setting `enabled = false` left
+    /// telemetry running at full rate.
+    pub fn set_telemetry_policy(&mut self, enabled: bool, max_events_per_second: u32) {
+        self.telemetry_enabled = enabled;
+        self.max_events_per_second = max_events_per_second;
+    }
+
+    /// Is there budget for one more event this second?
+    ///
+    /// A plain per-second ceiling rather than a smoothed rate: the thing being
+    /// bounded is how much a human or a log file has to read, and "at most N
+    /// lines a second" is what that means. **A window that drops anything
+    /// reports how much when it rolls over** — a rate limiter that silently
+    /// discards turns a busy system into one that looks idle, which is the same
+    /// failure as a camera that returns a blank frame instead of an error.
+    fn budget_allows(&mut self) -> bool {
+        if self.max_events_per_second == 0 {
+            return true;
+        }
+        let now = Instant::now();
+        let rolled = match self.budget_started {
+            None => true,
+            Some(t) => now.duration_since(t) >= Duration::from_secs(1),
+        };
+        if rolled {
+            let dropped = std::mem::take(&mut self.budget_dropped);
+            self.budget_started = Some(now);
+            self.budget_spent = 0;
+            if dropped > 0 {
+                // Emitted directly, bypassing the budget it is reporting on —
+                // otherwise the message about dropping would itself be dropped.
+                let envelope = TelemetryEnvelope {
+                    timestamp: chrono::Utc::now(),
+                    sequence: self.sequence,
+                    event: TelemetryEvent::TelemetryRateLimited { dropped },
+                };
+                self.sequence += 1;
+                self.budget_spent += 1;
+                let _ = self.telemetry_tx.send(envelope);
+            }
+        }
+        if self.budget_spent < self.max_events_per_second {
+            self.budget_spent += 1;
+            true
+        } else {
+            self.budget_dropped += 1;
+            false
+        }
+    }
+
     fn emit(&mut self, event: TelemetryEvent) {
+        if !self.telemetry_enabled || !self.budget_allows() {
+            return;
+        }
         let envelope = TelemetryEnvelope {
             timestamp: chrono::Utc::now(),
             sequence: self.sequence,
