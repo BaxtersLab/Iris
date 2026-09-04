@@ -610,6 +610,32 @@ verified removed (`diff -rq` clean, no patch returned).
       which needs no per-format knowledge. The round-6 probe hit this and caught
       it before reporting a phantom defect in the one format that round was about.
 
+## Hardware test serialisation — closed 2026-09-04
+
+- [x] **`iris_hal::device_lock` — one camera, one holder, across processes.**
+      Each hardware suite had grown a `static Mutex`, which serialises only
+      within one test binary; cargo runs each crate's tests in a separate
+      process, so `IRIS_USE_HW=1 cargo test --workspace` still raced. `flock(2)`
+      on a per-user lock file reaches across processes **and** within one —
+      `flock` binds to an open file description, and each guard opens its own —
+      so it replaced both mutexes rather than joining them.
+
+      **This was the fourth appearance of one defect**: two Windows
+      single-instance tests sharing a mutex name (round 5, 12 failures in 20),
+      three V4L2 tests sharing the camera in `iris-hal`, two more in
+      `iris-capture`, and finally the two binaries against each other. Each
+      local fix was correct and none could reach the next case.
+
+      Falsified on exactly that case: without the lock, both suites run
+      concurrently failed **3 of 3**, failure counts varying run to run; with it,
+      **0 of 5**. `LOCK_NB` instead of `LOCK_EX` fails the intra-process test in
+      15.79µs.
+
+- [ ] **Windows cross-process contention is not solved.** `flock` is unix; the
+      WMF suites still serialise only within their binary via a `static Mutex`.
+      `LockFileEx` is the equivalent and is declared rather than pretended away —
+      a silent no-op that looked like a lock would be worse than none.
+
 ## Ambient sensing — `/sense`, added 2026-09-04
 
 `GET /sense` returns `brightness`, `detail` and `motion` with **no image**: the

@@ -434,34 +434,18 @@ mod tests {
         assert_eq!(second, lo, "an advertised rate was requested but not granted");
     }
 
-    /// One camera, one test at a time.
+    /// One camera, one test at a time — **across processes**.
     ///
-    /// libtest runs tests on parallel threads, and the V4L2 hardware tests all
-    /// open `/dev/video0` and call `VIDIOC_S_FMT`. A second opener gets
-    /// `Device or resource busy (os error 16)`, so without this they fail each
-    /// other intermittently depending on scheduling — which is exactly the
-    /// defect the Windows box found in round 5, where two single-instance tests
-    /// shared one process-global mutex name and failed 12 runs in 20.
+    /// This was a `static Mutex`, which serialises only the tests inside this
+    /// binary. `cargo test` runs each crate's tests in its own process, so
+    /// `IRIS_USE_HW=1 cargo test --workspace` still let `iris-capture`'s
+    /// hardware tests open `/dev/video0` alongside these and fail with
+    /// `Device or resource busy`. `flock` reaches across processes and also
+    /// serialises within one, so it replaces the mutex rather than joining it.
     ///
-    /// The unix lock test there solved it by giving each test its own resource.
-    /// That is not available here: there is only one camera, so the resource
-    /// has to be taken in turn instead.
-    ///
-    /// **Windows needs it too, and for the same reason** — round 8 measured the
-    /// WMF hardware tests failing **5 runs in 5** in parallel with
-    /// `ReadSample: The video recording device is preempted by another immersive
-    /// application (0xC00D3EA3)`, and 0 in 5 serially. Different error code,
-    /// identical defect. So this is `any(linux, windows)` rather than
-    /// linux-only.
-    #[cfg(any(target_os = "linux", windows))]
-    static CAMERA: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Take the camera, tolerating a previous test having panicked while holding
-    /// it — a poisoned lock means another test failed, not that this one cannot
-    /// run, and reporting both failures is more useful than masking one.
-    #[cfg(any(target_os = "linux", windows))]
-    fn camera_guard() -> std::sync::MutexGuard<'static, ()> {
-        CAMERA.lock().unwrap_or_else(|e| e.into_inner())
+    /// See `iris_hal::device_lock` for why `flock` and not a pid file.
+    fn camera_guard() -> crate::device_lock::DeviceLock {
+        crate::device_lock::lock_capture_device()
     }
 
     // ---- frame rate ---------------------------------------------------------

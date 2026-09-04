@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Iris — iris-hal
 
+pub mod device_lock;
 pub mod backend;
 pub mod device;
 pub mod error;

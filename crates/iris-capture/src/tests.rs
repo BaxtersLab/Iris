@@ -435,25 +435,17 @@ mod mjpeg_roi_tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod mjpeg_hardware_tests {
-    /// One camera, one test at a time — **within this binary**.
+    /// One camera, one test at a time — **across processes**.
     ///
-    /// Both hardware tests here open `/dev/video0` and call `VIDIOC_S_FMT`; a
-    /// second opener gets `Device or resource busy (os error 16)`. This is the
-    /// third crate to need this (iris-hal on Linux, the WMF suite on Windows,
-    /// now here), so treat it as the default for any suite that touches a real
-    /// device rather than something to rediscover.
+    /// This was a `static Mutex`, which serialises only the tests inside this
+    /// binary. `cargo test` runs each crate's tests in its own process, so
+    /// `IRIS_USE_HW=1 cargo test --workspace` still let these run alongside
+    /// `iris-hal`'s hardware tests and fail with `Device or resource busy`.
+    /// `flock` reaches across processes and also serialises within one.
     ///
-    /// **Known limit:** cargo runs each crate's tests in its own **process**, so
-    /// this mutex cannot serialise `iris-capture` against `iris-hal`. With
-    /// `IRIS_USE_HW=1 cargo test --workspace` those two binaries can still
-    /// contend. Closing that properly needs a *file* lock — Iris already has one
-    /// in `single_instance` — and is not done here; run one crate at a time when
-    /// exercising hardware.
-    static CAMERA: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Poisoning means another test panicked, not that this one cannot run.
-    fn camera_guard() -> std::sync::MutexGuard<'static, ()> {
-        CAMERA.lock().unwrap_or_else(|e| e.into_inner())
+    /// See `iris_hal::device_lock` for why `flock` and not a pid file.
+    fn camera_guard() -> iris_hal::device_lock::DeviceLock {
+        iris_hal::device_lock::lock_capture_device()
     }
 
     /// Hardware: change the camera's **brightness control** — a uniform shift

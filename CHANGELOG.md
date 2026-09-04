@@ -13,6 +13,35 @@ the upgrade, so a published build would never reach anyone who already had one.
 `build_deb.sh` now refuses to build when the package version and the `iris-ui`
 crate version disagree.
 
+0.2.10 — 2026-09-04
+-------------------
+One camera, one holder — across processes
+- **`iris_hal::device_lock`**: an `flock(2)` lock on the capture device, replacing
+  the `static Mutex` each hardware suite had grown. A mutex serialises only the
+  tests inside one binary, and **cargo runs each crate's tests in its own
+  process** — so `IRIS_USE_HW=1 cargo test --workspace` still let `iris-hal` and
+  `iris-capture` both open `/dev/video0` and fail with
+  `Device or resource busy (os error 16)`.
+- **It replaces rather than joins the mutexes**, because `flock` associates a
+  lock with an *open file description* and each guard opens its own — so two
+  threads in one binary contend exactly as two processes do. There is a test for
+  that specific claim, since if it were false the change would have *removed*
+  protection rather than widened it.
+- **Blocking (`LOCK_EX`), and EINTR-retried.** A test that must wait for the
+  camera should wait; failing fast would only recreate the flakiness. A signal
+  must not hand back an unlocked guard that looks like success.
+- **A different file from the single-instance lock**, with a test pinning it.
+  "A test is using the camera" and "Iris is already running" are different
+  facts, and one file would make a running Iris and a test suite block each
+  other for no reason.
+- Released by the kernel when the descriptor closes, so a panicking or killed
+  test cannot wedge it — the same property that made `flock` right for
+  `single_instance`.
+- **Falsified on the case it exists for:** without the lock, running both
+  hardware suites concurrently failed **3 of 3** attempts, with the failure count
+  varying run to run. With it, **0 of 5**. And `LOCK_NB` in place of `LOCK_EX`
+  fails the intra-process test with "returned in 15.79µs without waiting".
+
 0.2.9 — 2026-09-04
 ------------------
 `motion` now tells movement from a lighting change
