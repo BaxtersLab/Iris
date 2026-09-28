@@ -24,7 +24,9 @@ VERSION="$(sed -n 's/^Version: //p' packaging/DEBIAN/control)"
 # skips the upgrade entirely, so a published build would simply never reach
 # anyone who already had one.
 CRATE_VERSION="$(sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' crates/iris-ui/Cargo.toml)"
-if [ "$VERSION" != "$CRATE_VERSION" ]; then
+# A Debian revision (after the last '-') is the package's own rebuild counter;
+# the upstream part must still equal the crate (2026-09-28).
+if [ "$VERSION" != "$CRATE_VERSION" ] && [ "${VERSION%-*}" != "$CRATE_VERSION" ]; then
     echo "FATAL: package version $VERSION != iris-ui crate version $CRATE_VERSION" >&2
     echo "       bump both, or a published upgrade will be skipped as already-installed" >&2
     exit 1
