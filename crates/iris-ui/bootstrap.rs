@@ -1,6 +1,6 @@
 use chrono::Utc;
 use iris_capture::backend::{CaptureConfig, DropPolicy};
-use iris_capture::service::{CaptureCommand, CaptureHandle, CaptureService};
+use iris_capture::service::{CaptureCommand, CaptureHandle, CaptureService, CaptureServiceState};
 use iris_capture::telemetry::CaptureTelemetry as CaptureTelemetryEvent;
 use iris_core::app::AppState;
 use iris_core::config::IrisConfig;
@@ -112,9 +112,72 @@ pub(crate) fn default_linux_backend(
     }
 }
 
+// --- GetStatus ----------------------------------------------------------------
+// Every field GetStatus returned was invented: device "Mock Camera" whatever
+// was in use (a real camera included), an empty capture state, and 0 fps, 0
+// frames and 0 subscribers however busy capture was. An agent asking "what is
+// Iris looking at" was told a fiction. Each field now comes from the thing it
+// describes.
+
+/// The capture service's state, as GetStatus reports it.
+pub(crate) fn capture_state_text(state: &CaptureServiceState) -> String {
+    match state {
+        CaptureServiceState::Idle => "Idle".into(),
+        CaptureServiceState::Capturing => "Capturing".into(),
+        CaptureServiceState::Paused => "Paused".into(),
+        CaptureServiceState::Error(e) => format!("Error: {e}"),
+    }
+}
+
+/// Measured frames per second over the frames the ring holds, and how many it
+/// has taken in. The rate is 0 when fewer than two frames are held or the
+/// newest is over a second old (nothing is arriving), never an estimate.
+pub(crate) fn ring_rate(rb: &iris_stream::RingBuffer, now_us: u64) -> (f64, u64) {
+    let total = rb.total_written();
+    let held = rb.len();
+    let (Some(oldest), Some(newest)) = (rb.read_by_age(0), rb.read_latest()) else {
+        return (0.0, total);
+    };
+    if held < 2
+        || newest.timestamp_us <= oldest.timestamp_us
+        || now_us.saturating_sub(newest.timestamp_us) > 1_000_000
+    {
+        return (0.0, total);
+    }
+    let secs = (newest.timestamp_us - oldest.timestamp_us) as f64 / 1_000_000.0;
+    ((held - 1) as f64 / secs, total)
+}
+
+/// What GetStatus names as the capture source, given `IRIS_BACKEND` and the
+/// cameras enumeration found. Mirrors the backend selection in `bootstrap`,
+/// including where it falls back to the synthetic source.
+pub(crate) fn capture_source_label(backend_name: &str, cameras: &[String]) -> String {
+    let synthetic = |why: &str| format!("synthetic test source ({why})");
+    match backend_name {
+        "mock" => synthetic("IRIS_BACKEND=mock"),
+        "dxgi" if cfg!(windows) => "screen capture (IRIS_BACKEND=dxgi)".into(),
+        "dxgi" => synthetic("IRIS_BACKEND=dxgi is Windows-only"),
+        "wmf" if !cfg!(windows) => synthetic("IRIS_BACKEND=wmf is Windows-only"),
+        "v4l2" if !cfg!(target_os = "linux") => synthetic("IRIS_BACKEND=v4l2 is Linux-only"),
+        // The Windows default path still falls back to the mock with no camera
+        // (Linux uses NoCameraBackend); say so rather than "none".
+        _ if cameras.is_empty() && cfg!(windows) => synthetic("no camera found"),
+        _ => match cameras.first() {
+            Some(name) => name.clone(),
+            None => format!("none: {}", iris_capture::backend::NO_CAMERA),
+        },
+    }
+}
+
 /// Minimal dispatcher implemented inside `iris-ui` that implements the `iris-ipc::Dispatcher` trait.
 pub struct IrisDispatcher {
     capture_cmd: MpscSender<CaptureCommand>,
+    /// The capture service's state, for GetStatus.
+    capture_state: tokio::sync::watch::Receiver<CaptureServiceState>,
+    /// Stream statistics (subscriber count), for GetStatus.
+    stream: iris_stream::StreamHandle,
+    /// What is being captured from, for GetStatus (see `capture_source_label`).
+    source: String,
     /// Shared mirror flag, so `GetFrame` matches what the window shows.
     mirror: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The newest frames, for `GetFrame`.
@@ -130,9 +193,15 @@ impl IrisDispatcher {
         capture_cmd: MpscSender<CaptureCommand>,
         frames: iris_stream::SharedRingBuffer,
         mirror: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        capture_state: tokio::sync::watch::Receiver<CaptureServiceState>,
+        stream: iris_stream::StreamHandle,
+        source: String,
     ) -> Self {
         Self {
             capture_cmd,
+            capture_state,
+            stream,
+            source,
             frames,
             mirror,
         }
@@ -147,17 +216,28 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
         let cmd_sender = self.capture_cmd.clone();
         let frames = self.frames.clone();
         let mirror = self.mirror.clone();
+        let capture_state = capture_state_text(&self.capture_state.borrow());
+        let stream = self.stream.clone();
+        let source = self.source.clone();
         Box::pin(async move {
             use iris_ipc::command::IpcCommand;
             match cmd {
                 IpcCommand::Ping => IpcResponse::Ok(ResponseData::Pong { uptime_ms: 0 }),
                 IpcCommand::GetStatus => {
+                    let (fps, frame_count) = match frames.lock() {
+                        Ok(rb) => ring_rate(&rb, iris_capture::frame::CaptureFrame::now_us()),
+                        Err(_) => (0.0, 0),
+                    };
+                    let subscriber_count = match stream.stats().await {
+                        Ok(s) => s.subscriber_count,
+                        Err(_) => 0,
+                    };
                     let status = ResponseData::Status {
-                        capture_state: format!("{:?}", ""),
-                        device_name: "Mock Camera".to_string(),
-                        fps: 0.0,
-                        frame_count: 0,
-                        subscriber_count: 0,
+                        capture_state,
+                        device_name: source,
+                        fps,
+                        frame_count,
+                        subscriber_count,
                     };
                     IpcResponse::Ok(status)
                 }
@@ -486,6 +566,27 @@ impl IrisRuntime {
         let backend_name = std::env::var("IRIS_BACKEND")
             .unwrap_or_default()
             .to_lowercase();
+        // The cameras present, by name, for GetStatus's source label.
+        let cameras: Vec<String> = {
+            #[cfg(target_os = "linux")]
+            {
+                iris_hal::v4l2_backend::v4l2::V4l2UvcBackend::enumerate_sync()
+                    .map(|list| list.into_iter().map(|d| d.name).collect())
+                    .unwrap_or_default()
+            }
+            #[cfg(windows)]
+            {
+                iris_hal::wmf_backend::wmf::WmfUvcBackend::enumerate_sync()
+                    .map(|list| list.into_iter().map(|d| d.name).collect())
+                    .unwrap_or_default()
+            }
+            #[cfg(not(any(windows, target_os = "linux")))]
+            {
+                Vec::new()
+            }
+        };
+        let source_label = capture_source_label(&backend_name, &cameras);
+        println!("Capture source: {source_label}");
 
         // Box up a dynamic backend so `CaptureService` can be instantiated at runtime.
         // IRIS_BACKEND: unset (the camera, if present) | "mock" (synthetic) |
@@ -765,7 +866,14 @@ impl IrisRuntime {
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
 
         // 5. Dispatcher
-        let dispatcher = IrisDispatcher::new(cmd_tx.clone(), frames_ring.clone(), mirror.clone());
+        let dispatcher = IrisDispatcher::new(
+            cmd_tx.clone(),
+            frames_ring.clone(),
+            mirror.clone(),
+            capture_handle.state_rx.clone(),
+            stream_handle.clone(),
+            source_label.clone(),
+        );
 
         // 6. Spawn services
         let mut tasks = Vec::new();
@@ -1447,5 +1555,105 @@ mod no_camera_tests {
         let err = backend.start().await.expect_err("no camera must not start a capture");
         assert!(err.to_string().contains(NO_CAMERA), "{err}");
         assert!(backend.next_frame().await.is_err(), "no camera must yield no frame");
+    }
+}
+
+#[cfg(test)]
+mod get_status_tests {
+    use super::{capture_source_label, capture_state_text, ring_rate, IrisDispatcher};
+    use iris_capture::frame::CaptureFrame;
+    use iris_capture::service::CaptureServiceState;
+    use iris_hal::device::PixelFormat;
+    use iris_ipc::{response::IpcResponse, response::ResponseData, Dispatcher};
+
+    /// Capture numbers frames from 1: the ring treats sequence 0 as an empty
+    /// slot, so a frame 0 would silently not count.
+    fn frame(seq: u64, ts: u64) -> CaptureFrame {
+        assert!(seq > 0, "sequence 0 is an empty ring slot");
+        CaptureFrame {
+            sequence: seq,
+            width: 2,
+            height: 2,
+            format: PixelFormat::Rgb24,
+            data: vec![seq as u8; 12],
+            timestamp_us: ts,
+            is_cropped: false,
+        }
+    }
+
+    #[test]
+    fn the_state_is_the_capture_services() {
+        assert_eq!(capture_state_text(&CaptureServiceState::Capturing), "Capturing");
+        assert_eq!(capture_state_text(&CaptureServiceState::Idle), "Idle");
+        assert_eq!(capture_state_text(&CaptureServiceState::Paused), "Paused");
+        assert_eq!(
+            capture_state_text(&CaptureServiceState::Error("start failed: device error: no camera found".into())),
+            "Error: start failed: device error: no camera found"
+        );
+    }
+
+    #[test]
+    fn fps_is_measured_from_the_frames_held() {
+        let now = 50_000_000u64;
+        let mut rb = iris_stream::RingBuffer::new(8);
+        for i in 0..4u64 {
+            rb.write(&frame(i + 1, now - 100_000 + i * 33_333)); // ~30 fps, newest ~now
+        }
+        let (fps, total) = ring_rate(&rb, now);
+        assert!((fps - 30.0).abs() < 0.1, "fps was {fps}");
+        assert_eq!(total, 4);
+    }
+
+    #[test]
+    fn no_rate_when_nothing_is_arriving() {
+        let now = 50_000_000u64;
+        let mut rb = iris_stream::RingBuffer::new(8);
+        assert_eq!(ring_rate(&rb, now), (0.0, 0), "an empty ring");
+        rb.write(&frame(1, now));
+        assert_eq!(ring_rate(&rb, now), (0.0, 1), "one frame is not a rate");
+        rb.write(&frame(2, now + 33_333));
+        assert!(ring_rate(&rb, now + 33_333).0 > 29.0, "control: two fresh frames are a rate");
+        assert_eq!(ring_rate(&rb, now + 33_333 + 2_000_000), (0.0, 2), "the newest is 2 s old");
+    }
+
+    #[test]
+    fn the_source_is_named_never_mock_camera() {
+        let cams = vec!["Logitech C920".to_string()];
+        assert_eq!(capture_source_label("", &cams), "Logitech C920");
+        assert_eq!(capture_source_label("mock", &cams), "synthetic test source (IRIS_BACKEND=mock)");
+        #[cfg(target_os = "linux")]
+        assert_eq!(capture_source_label("", &[]), "none: no camera found");
+        for name in ["", "mock", "v4l2", "wmf", "dxgi"] {
+            assert_ne!(capture_source_label(name, &[]), "Mock Camera");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_status_reports_what_is_true() {
+        let (state_tx, state_rx) = tokio::sync::watch::channel(CaptureServiceState::Error(
+            "start failed: device error: no camera found".into(),
+        ));
+        let (_frames_tx, frames_rx) = tokio::sync::mpsc::channel(4);
+        let (telemetry_tx, _telemetry_rx) = tokio::sync::broadcast::channel(16);
+        let (service, stream) = iris_stream::StreamService::new(frames_rx, telemetry_tx, iris_stream::StreamMode::Pull, 4, 2);
+        tokio::spawn(service.run());
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
+        let ring = stream.ring_buffer.clone();
+        let mirror = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut d = IrisDispatcher::new(cmd_tx, ring, mirror, state_rx, stream, "none: no camera found".into());
+        match d.dispatch(iris_ipc::command::IpcCommand::GetStatus).await {
+            IpcResponse::Ok(ResponseData::Status { capture_state, device_name, fps, frame_count, subscriber_count }) => {
+                assert_eq!(device_name, "none: no camera found");
+                assert_eq!(capture_state, "Error: start failed: device error: no camera found");
+                assert_eq!((fps, frame_count, subscriber_count), (0.0, 0, 0));
+            }
+            other => panic!("GetStatus answered {other:?}"),
+        }
+        // The state is read at each request, not fixed at start-up.
+        state_tx.send(CaptureServiceState::Capturing).unwrap();
+        match d.dispatch(iris_ipc::command::IpcCommand::GetStatus).await {
+            IpcResponse::Ok(ResponseData::Status { capture_state, .. }) => assert_eq!(capture_state, "Capturing"),
+            other => panic!("GetStatus answered {other:?}"),
+        }
     }
 }
