@@ -1,5 +1,6 @@
 ﻿use eframe::egui::{self, CentralPanel, ScrollArea, TopBottomPanel};
 use eframe::egui::{ColorImage, TextureHandle, Key, Color32, Stroke, Rounding};
+use iris_capture::backend::OpenedCamera;
 use iris_capture::frame::CaptureFrame;
 use iris_capture::service::{CaptureHandle, CaptureServiceState};
 use iris_ipc::command::IpcCommand;
@@ -284,6 +285,8 @@ pub struct IrisApp {
     // (thumbnail fields removed; preview-only)
     // Last time cameras were scanned and result summary
     last_scan_summary: Arc<Mutex<String>>,
+    /// Why the last Select did not select, shown under the camera list.
+    select_note: Arc<Mutex<Option<String>>>,
     // Preview drain accounting. `frames_received` counts every frame taken off
     // the capture channel; `frames_converted` counts the ones actually turned
     // into an RGBA texture. They are equal only if the UI converts every frame
@@ -322,6 +325,8 @@ impl IrisApp {
         show_telemetry_panel: bool,
     ) -> Self {
         let telemetry_rx = ipc.subscribe_telemetry();
+        let mut open_rx = capture.device_rx.clone();
+        let state_rx = capture.state_rx.clone();
         let app = Self {
             show_telemetry_panel,
             ipc: ipc.clone(),
@@ -336,6 +341,7 @@ impl IrisApp {
             did_set_window_size: false,
             is_capturing: false,
             last_scan_summary: Arc::new(Mutex::new("Not scanned yet".to_string())),
+            select_note: Arc::new(Mutex::new(None)),
             frames_received: 0,
             frames_converted: 0,
             perf_last_report: None,
@@ -359,33 +365,51 @@ impl IrisApp {
                     *dv = devices.clone();
                 }
                 if !devices.is_empty() {
-                    // Prefer a real camera device over mock/virtual ones
-                    let mut chosen: Option<String> = None;
-                    for d in devices.iter() {
-                        let name = d.name.to_lowercase();
-                        if !(name.contains("mock") || name.contains("virtual") || name.contains("loopback")) {
-                            chosen = Some(d.id.clone());
-                            break;
-                        }
-                    }
-                    let first_id = chosen.unwrap_or_else(|| devices[0].id.clone());
-                    // attempt to tell the backend to select the device
-                    let _ = ipc_clone
-                        .send_command(IpcCommand::SelectDevice { device_id: first_id.clone() })
-                        .await;
+                    // Mark the camera capture actually opened. This marked a
+                    // guess (the first name without "mock", "virtual" or
+                    // "loopback") and told the dispatcher, which ignored it, so
+                    // with IRIS_DEVICE set, or a loopback device listed first,
+                    // the window marked one camera while capture read another.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        open_rx.wait_for(|d| d.is_some()),
+                    )
+                    .await;
+                    let open = open_rx.borrow().clone();
+                    let capturing = matches!(*state_rx.borrow(), CaptureServiceState::Capturing);
+                    let mark = startup_mark(open.as_ref(), capturing, &devices);
                     if let Ok(mut s) = selected_ref.lock() {
-                        *s = Some(first_id.clone());
+                        *s = mark.clone();
                     }
-                    // Kick off capture automatically when a physical device was selected
-                    // (backend may ignore if selection failed)
-                    let _ = ipc_clone.send_command(IpcCommand::StartCapture).await;
-                    // mark UI capturing state so Start button highlights appropriately
-                    // Note: we can't mutate self here because we're in a spawned task; rely on telemetry
+                    if mark.is_some() {
+                        let _ = ipc_clone.send_command(IpcCommand::StartCapture).await;
+                    }
                 }
             }
         });
 
         app
+    }
+}
+
+/// The camera the window marks at start-up: the one capture opened. A source
+/// that is not a camera opens none; while it runs, the window marks its listed
+/// synthetic entry, never a real camera it is not reading.
+pub(crate) fn startup_mark(open: Option<&OpenedCamera>, capturing: bool, listed: &[DeviceEntry]) -> Option<String> {
+    match open {
+        Some(cam) => Some(cam.id.clone()),
+        None if capturing => listed.iter().find(|d| d.id.starts_with("mock")).map(|d| d.id.clone()),
+        None => None,
+    }
+}
+
+/// What the window does with the answer to Select: mark the camera, or show why
+/// not. It marked the camera whatever the answer was.
+pub(crate) fn after_select<E: std::fmt::Display>(answer: Result<IpcResponse, E>, id: &str) -> Result<String, String> {
+    match answer {
+        Ok(IpcResponse::Ok(_)) => Ok(id.to_string()),
+        Ok(IpcResponse::Error { message, .. }) => Err(message),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -834,6 +858,11 @@ impl eframe::App for IrisApp {
                     if let Ok(s) = self.last_scan_summary.lock() {
                         ui.label(egui::RichText::new(s.as_str()).small().weak());
                     }
+                    if let Ok(n) = self.select_note.lock() {
+                        if let Some(n) = n.as_deref() {
+                            ui.label(egui::RichText::new(n).small().color(Color32::from_rgb(230, 160, 60)));
+                        }
+                    }
 
                     ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                         if let Ok(dv) = self.devices.lock() {
@@ -866,14 +895,27 @@ impl eframe::App for IrisApp {
                                             let ipc = Arc::clone(&self.ipc);
                                             let id = dev.id.clone();
                                             let sel = self.selected_device.clone();
+                                            let note = self.select_note.clone();
                                             tokio::spawn(async move {
-                                                let _ = ipc
+                                                let answer = ipc
                                                     .send_command(IpcCommand::SelectDevice {
                                                         device_id: id.clone(),
                                                     })
                                                     .await;
-                                                if let Ok(mut s) = sel.lock() {
-                                                    *s = Some(id);
+                                                match after_select(answer, &id) {
+                                                    Ok(mark) => {
+                                                        if let Ok(mut s) = sel.lock() {
+                                                            *s = Some(mark);
+                                                        }
+                                                        if let Ok(mut n) = note.lock() {
+                                                            *n = None;
+                                                        }
+                                                    }
+                                                    Err(why) => {
+                                                        if let Ok(mut n) = note.lock() {
+                                                            *n = Some(why);
+                                                        }
+                                                    }
                                                 }
                                             });
                                         }
@@ -1404,5 +1446,46 @@ mod preview_placeholder_tests {
                 ("waiting for frames — last was 640x480".to_string(), false)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod camera_mark_tests {
+    use super::{after_select, startup_mark};
+    use iris_capture::backend::OpenedCamera;
+    use iris_ipc::response::{DeviceEntry, IpcResponse, ResponseData};
+
+    fn listed(ids: &[(&str, &str)]) -> Vec<DeviceEntry> {
+        ids.iter()
+            .map(|(id, name)| DeviceEntry { id: (*id).into(), name: (*name).into(), vendor: "Iris".into(), resolutions: vec![] })
+            .collect()
+    }
+
+    #[test]
+    fn start_up_marks_the_camera_capture_opened_not_a_guess() {
+        // A loopback device listed first: capture opens it (devices[0]), and the
+        // old guess skipped "loopback" names and marked the real camera instead.
+        let devices = listed(&[("/dev/video0", "Loopback cam"), ("/dev/video2", "USB Camera")]);
+        let open = OpenedCamera { id: "/dev/video0".into(), name: "Loopback cam".into() };
+        assert_eq!(startup_mark(Some(&open), true, &devices).as_deref(), Some("/dev/video0"));
+    }
+
+    #[test]
+    fn a_synthetic_source_marks_its_own_entry_and_never_a_camera() {
+        let devices = listed(&[("/dev/video0", "USB Camera"), ("mock-0", "synthetic")]);
+        assert_eq!(startup_mark(None, true, &devices).as_deref(), Some("mock-0"));
+        assert_eq!(startup_mark(None, true, &listed(&[("/dev/video0", "USB Camera")])), None);
+        assert_eq!(startup_mark(None, false, &devices), None, "nothing is capturing");
+    }
+
+    #[test]
+    fn select_marks_only_when_the_answer_is_ok() {
+        let ok: Result<IpcResponse, String> = Ok(IpcResponse::Ok(ResponseData::Empty));
+        assert_eq!(after_select(ok, "/dev/video2"), Ok("/dev/video2".to_string()));
+        let refused: Result<IpcResponse, String> =
+            Ok(IpcResponse::Error { code: 501, message: "switching cameras is not implemented".into() });
+        assert_eq!(after_select(refused, "/dev/video2"), Err("switching cameras is not implemented".to_string()));
+        let lost: Result<IpcResponse, String> = Err("ipc closed".into());
+        assert_eq!(after_select(lost, "/dev/video2"), Err("ipc closed".to_string()));
     }
 }

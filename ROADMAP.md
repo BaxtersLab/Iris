@@ -814,3 +814,44 @@ decode stubs are filled, so selecting an MJPEG mode is now useful end to end** �
 real hardware at 1920x1080. Callers should still check `PixelFormat::is_raw()` before treating
 frame data as a pixel grid: `read_frame` deliberately returns the compressed bytes untouched, and
 decoding is an explicit step via `iris_capture::mjpeg::decode_to_rgb24`.
+
+## IPC dispatcher: what it answers (first update, 2026-09-30)
+
+The dispatcher (`crates/iris-ui/bootstrap.rs`) answered many commands with a bare
+"ok" while doing nothing. The window's Select button moved its "selected" mark on
+that "ok", whichever camera capture was reading. Now each answer says what
+happened. Real: `Ping` uptime, `GetStreamStats`, `GetStatus` naming the camera
+actually open, `GetDeviceCapabilities` on Linux (a V4L2 probe of the open
+camera), and `SelectDevice` for the open camera. The rest answer 501 ("… is not
+implemented") or, when capture is not running, 503.
+
+- [ ] STUB: `SelectDevice` for another camera — restart capture on the chosen
+      camera; the backend already honours `IRIS_DEVICE` when it starts — capture
+      cannot restart (next entry). It answers 501, naming the camera in use and
+      the `IRIS_DEVICE=` setting that would choose the other, and the window
+      shows that instead of moving its mark.
+- [ ] STUB: restartable capture (`StopCapture`, then `StartCapture`) — a capture
+      service that can stop and start again — `Stop` ends the service's run loop
+      and drops its command channel. Every later capture command answers 503
+      "capture is not running", and the window's Start does nothing after Stop.
+- [ ] GAP: `CaptureHandle::send` — its channel's receiver is dropped inside
+      `CaptureService::new`. The service reads the channel that bootstrap passes
+      to `run`, so `send` can never deliver. Nothing calls it today: wire it or
+      remove it.
+- [ ] STUB: IPC `Subscribe` / `Unsubscribe` — a frame subscription an IPC client
+      can read — IPC here is request/response, and `GetFrame` serves the pull
+      case. 501 (was "id 1" every time).
+- [ ] STUB: IPC `SetResolution` / `SetPixelFormat` — change the capture mode
+      while Iris runs — needs restartable capture. 501; the config's
+      `capture.*` settings apply at start.
+- [ ] STUB: IPC configuration (`GetConfig`, `ReloadConfig`, `UpdateConfig`) and
+      profiles (`LoadProfile`, `SaveProfile`) — 501 (was `{}` and invented
+      success). Profiles work in the window's Camera controls.
+- [ ] STUB: IPC controls (`ListControls`, `GetControl`, `SetControl`,
+      `ResetControl`), `Init`, `Shutdown`, `DisconnectDevice` — 501 (a catch-all
+      answered "ok"). The control service serves the window, not IPC.
+- [ ] STUB: `GetDeviceCapabilities` off Linux — the WMF backend has
+      `probe_capabilities`; the Windows fork wires it. 501 there now.
+- Not shipped, same fakes, left alone: `iris-ipc-pipe-bridge` (Windows) keeps
+  its own dispatcher (Ping 0, Subscribe 1); `IpcServer::run()`, reached only
+  from `iris-ipc`'s tests, answers Ping with the Unix time as "uptime".

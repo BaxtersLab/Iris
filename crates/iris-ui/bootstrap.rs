@@ -1,5 +1,5 @@
 use chrono::Utc;
-use iris_capture::backend::{CaptureConfig, DropPolicy};
+use iris_capture::backend::{CaptureConfig, DropPolicy, OpenedCamera};
 use iris_capture::service::{CaptureCommand, CaptureHandle, CaptureService, CaptureServiceState};
 use iris_capture::telemetry::CaptureTelemetry as CaptureTelemetryEvent;
 use iris_core::app::AppState;
@@ -169,6 +169,70 @@ pub(crate) fn capture_source_label(backend_name: &str, cameras: &[String]) -> St
     }
 }
 
+// --- answers that are true ----------------------------------------------------
+// Beyond GetStatus (above), the dispatcher answered Ping with an uptime of 0,
+// Subscribe with id 1 every time, GetDeviceCapabilities with "unknown",
+// GetStreamStats with zeros, and SelectDevice, the profile, config and mode
+// commands and every unlisted command with a bare "ok" while doing nothing. The
+// window's Select button moved its "selected" mark on that "ok", whichever camera
+// capture was actually reading. Each answer now says what happened.
+
+/// What a command that is not implemented answers, instead of a bare "ok".
+pub(crate) fn not_implemented(what: &str) -> IpcResponse {
+    IpcResponse::Error { code: 501, message: format!("{what} is not implemented") }
+}
+
+/// Capture has ended (StopCapture ends it for good) or never started.
+pub(crate) const CAPTURE_NOT_RUNNING: &str =
+    "capture is not running (it was stopped, or never started: see GetStatus); restart Iris to capture again";
+
+/// Pass a command to the capture service, and say so when nothing is listening.
+async fn tell_capture(tx: &MpscSender<CaptureCommand>, cmd: CaptureCommand) -> IpcResponse {
+    match tx.send(cmd).await {
+        Ok(()) => IpcResponse::Ok(ResponseData::Empty),
+        Err(_) => IpcResponse::Error { code: 503, message: CAPTURE_NOT_RUNNING.into() },
+    }
+}
+
+/// SelectDevice: "ok" only for the camera capture has open. Switching cameras
+/// needs capture to restart, which it cannot yet (ROADMAP.md).
+pub(crate) fn select_device_answer(open: Option<&OpenedCamera>, wanted: &str) -> IpcResponse {
+    match open {
+        Some(cam) if cam.id == wanted => IpcResponse::Ok(ResponseData::Empty),
+        Some(cam) => IpcResponse::Error {
+            code: 501,
+            message: format!(
+                "switching cameras is not implemented: Iris is capturing from {} ({}). \
+                 Start Iris with IRIS_DEVICE={wanted} to use that camera.",
+                cam.name, cam.id
+            ),
+        },
+        None => IpcResponse::Error { code: 503, message: "no camera is open, so none can be selected".into() },
+    }
+}
+
+/// How long SelectDevice waits for capture to open its camera. The window asks
+/// as soon as it has listed the cameras, which can be before capture has opened
+/// one. A capture that has ended does not make it wait: its sender is gone.
+const SELECT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Reads a camera's formats, as JSON. `None` where no probe exists.
+pub(crate) type CapabilityProbe = fn(&str) -> Result<String, String>;
+
+#[cfg(target_os = "linux")]
+fn v4l2_capabilities(id: &str) -> Result<String, String> {
+    let caps = iris_hal::v4l2_backend::v4l2::V4l2UvcBackend::probe_capabilities_sync(
+        &iris_hal::device::DeviceId(id.into()),
+    )
+    .map_err(|e| e.to_string())?;
+    serde_json::to_string(&caps).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "linux")]
+const CAPABILITY_PROBE: Option<CapabilityProbe> = Some(v4l2_capabilities);
+#[cfg(not(target_os = "linux"))]
+const CAPABILITY_PROBE: Option<CapabilityProbe> = None;
+
 /// Minimal dispatcher implemented inside `iris-ui` that implements the `iris-ipc::Dispatcher` trait.
 pub struct IrisDispatcher {
     capture_cmd: MpscSender<CaptureCommand>,
@@ -176,8 +240,16 @@ pub struct IrisDispatcher {
     capture_state: tokio::sync::watch::Receiver<CaptureServiceState>,
     /// Stream statistics (subscriber count), for GetStatus.
     stream: iris_stream::StreamHandle,
-    /// What is being captured from, for GetStatus (see `capture_source_label`).
+    /// What is being captured from, for GetStatus (see `capture_source_label`),
+    /// when no camera is open to name.
     source: String,
+    /// The camera capture has open, for SelectDevice, GetStatus and
+    /// GetDeviceCapabilities.
+    device: tokio::sync::watch::Receiver<Option<OpenedCamera>>,
+    /// When the dispatcher started, for Ping.
+    started: std::time::Instant,
+    /// Reads the open camera's formats, for GetDeviceCapabilities.
+    probe: Option<CapabilityProbe>,
     /// Shared mirror flag, so `GetFrame` matches what the window shows.
     mirror: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The newest frames, for `GetFrame`.
@@ -196,15 +268,26 @@ impl IrisDispatcher {
         capture_state: tokio::sync::watch::Receiver<CaptureServiceState>,
         stream: iris_stream::StreamHandle,
         source: String,
+        device: tokio::sync::watch::Receiver<Option<OpenedCamera>>,
     ) -> Self {
         Self {
             capture_cmd,
             capture_state,
             stream,
             source,
+            device,
+            started: std::time::Instant::now(),
+            probe: CAPABILITY_PROBE,
             frames,
             mirror,
         }
+    }
+
+    /// The same dispatcher with another capability probe (tests).
+    #[cfg(test)]
+    pub(crate) fn with_probe(mut self, probe: Option<CapabilityProbe>) -> Self {
+        self.probe = probe;
+        self
     }
 }
 
@@ -219,10 +302,16 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
         let capture_state = capture_state_text(&self.capture_state.borrow());
         let stream = self.stream.clone();
         let source = self.source.clone();
+        let mut device = self.device.clone();
+        let open_name = device.borrow().as_ref().map(|c| c.name.clone());
+        let started = self.started;
+        let probe = self.probe;
         Box::pin(async move {
             use iris_ipc::command::IpcCommand;
             match cmd {
-                IpcCommand::Ping => IpcResponse::Ok(ResponseData::Pong { uptime_ms: 0 }),
+                IpcCommand::Ping => IpcResponse::Ok(ResponseData::Pong {
+                    uptime_ms: started.elapsed().as_millis() as u64,
+                }),
                 IpcCommand::GetStatus => {
                     let (fps, frame_count) = match frames.lock() {
                         Ok(rb) => ring_rate(&rb, iris_capture::frame::CaptureFrame::now_us()),
@@ -234,7 +323,9 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                     };
                     let status = ResponseData::Status {
                         capture_state,
-                        device_name: source,
+                        // The camera actually open, which IRIS_DEVICE may have
+                        // chosen over the first one found.
+                        device_name: open_name.unwrap_or(source),
                         fps,
                         frame_count,
                         subscriber_count,
@@ -302,18 +393,9 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                         .collect();
                     IpcResponse::Ok(ResponseData::DeviceList { devices })
                 }
-                IpcCommand::ResumeCapture => {
-                    let _ = cmd_sender.send(CaptureCommand::Resume).await;
-                    IpcResponse::Ok(ResponseData::Empty)
-                }
-                IpcCommand::PauseCapture => {
-                    let _ = cmd_sender.send(CaptureCommand::Pause).await;
-                    IpcResponse::Ok(ResponseData::Empty)
-                }
-                IpcCommand::SetFps { fps } => {
-                    let _ = cmd_sender.send(CaptureCommand::SetFps(fps)).await;
-                    IpcResponse::Ok(ResponseData::Empty)
-                }
+                IpcCommand::ResumeCapture => tell_capture(&cmd_sender, CaptureCommand::Resume).await,
+                IpcCommand::PauseCapture => tell_capture(&cmd_sender, CaptureCommand::Pause).await,
+                IpcCommand::SetFps { fps } => tell_capture(&cmd_sender, CaptureCommand::SetFps(fps)).await,
                 IpcCommand::SetRoi {
                     x,
                     y,
@@ -326,27 +408,41 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                         width,
                         height,
                     };
-                    let _ = cmd_sender.send(CaptureCommand::SetRoi(Some(roi))).await;
-                    IpcResponse::Ok(ResponseData::Empty)
+                    tell_capture(&cmd_sender, CaptureCommand::SetRoi(Some(roi))).await
                 }
-                IpcCommand::ClearRoi => {
-                    let _ = cmd_sender.send(CaptureCommand::SetRoi(None)).await;
-                    IpcResponse::Ok(ResponseData::Empty)
+                IpcCommand::ClearRoi => tell_capture(&cmd_sender, CaptureCommand::SetRoi(None)).await,
+                IpcCommand::SetResolution { .. } | IpcCommand::SetPixelFormat { .. } => not_implemented(
+                    "changing the capture mode while Iris runs (set capture.width, capture.height or \
+                     capture.pixel_format in the config and restart Iris)",
+                ),
+                IpcCommand::SelectDevice { device_id } => {
+                    let _ = tokio::time::timeout(SELECT_WAIT, device.wait_for(|d| d.is_some())).await;
+                    let open = device.borrow().clone();
+                    select_device_answer(open.as_ref(), &device_id)
                 }
-                IpcCommand::SetResolution {
-                    width: _,
-                    height: _,
-                } => IpcResponse::Ok(ResponseData::Empty),
-                IpcCommand::SetPixelFormat { format: _ } => IpcResponse::Ok(ResponseData::Empty),
-                IpcCommand::SelectDevice { device_id: _ } => IpcResponse::Ok(ResponseData::Empty),
                 IpcCommand::GetDeviceCapabilities => {
-                    IpcResponse::Ok(ResponseData::DeviceCapabilities {
-                        capabilities: "unknown".to_string(),
-                    })
+                    let open = device.borrow().clone();
+                    match (open, probe) {
+                        (None, _) => IpcResponse::Error {
+                            code: 503,
+                            message: "no camera is open to probe".into(),
+                        },
+                        (Some(_), None) => not_implemented("probing a camera's formats on this platform"),
+                        (Some(cam), Some(probe)) => {
+                            let id = cam.id.clone();
+                            match tokio::task::spawn_blocking(move || probe(&id)).await {
+                                Ok(Ok(json)) => IpcResponse::Ok(ResponseData::DeviceCapabilities { capabilities: json }),
+                                Ok(Err(e)) => IpcResponse::Error {
+                                    code: 500,
+                                    message: format!("probing {} ({}) failed: {e}", cam.name, cam.id),
+                                },
+                                Err(e) => IpcResponse::Error { code: 500, message: format!("the probe did not finish: {e}") },
+                            }
+                        }
+                    }
                 }
-                IpcCommand::Subscribe => IpcResponse::Ok(ResponseData::SubscriberId { id: 1 }),
-                IpcCommand::Unsubscribe { subscriber_id: _ } => {
-                    IpcResponse::Ok(ResponseData::Empty)
+                IpcCommand::Subscribe | IpcCommand::Unsubscribe { .. } => {
+                    not_implemented("a frame subscription over IPC (GetFrame returns the newest frame)")
                 }
                 IpcCommand::GetFrame { max_width, quality } => {
                     // Defaults chosen for a vision projector rather than for a
@@ -398,34 +494,24 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                         }
                     }
                 }
-                IpcCommand::GetStreamStats => IpcResponse::Ok(ResponseData::StreamStats {
-                    frames_delivered: 0,
-                    frames_dropped: 0,
-                    subscriber_count: 0,
-                    ring_buffer_usage: 0.0,
-                }),
-                IpcCommand::GetConfig => IpcResponse::Ok(ResponseData::Config {
-                    json: "{}".to_string(),
-                }),
-                IpcCommand::ReloadConfig => IpcResponse::Ok(ResponseData::Empty),
-                IpcCommand::UpdateConfig {
-                    section: _,
-                    json: _,
-                } => IpcResponse::Ok(ResponseData::Empty),
-                IpcCommand::LoadProfile { name } => {
-                    IpcResponse::Ok(ResponseData::ProfileLoaded { name })
+                IpcCommand::GetStreamStats => match stream.stats().await {
+                    Ok(s) => IpcResponse::Ok(ResponseData::StreamStats {
+                        frames_delivered: s.frames_delivered,
+                        frames_dropped: s.frames_dropped,
+                        subscriber_count: s.subscriber_count,
+                        ring_buffer_usage: s.ring_buffer_usage,
+                    }),
+                    Err(e) => IpcResponse::Error { code: 503, message: format!("stream statistics are unavailable: {e}") },
+                },
+                IpcCommand::GetConfig | IpcCommand::ReloadConfig | IpcCommand::UpdateConfig { .. } => {
+                    not_implemented("configuration over IPC (edit the config file and restart Iris)")
                 }
-                IpcCommand::SaveProfile { name } => {
-                    IpcResponse::Ok(ResponseData::ProfileSaved { name })
+                IpcCommand::LoadProfile { .. } | IpcCommand::SaveProfile { .. } => {
+                    not_implemented("camera profiles over IPC (use Camera controls in the Iris window)")
                 }
-                IpcCommand::StartCapture => {
-                    let _ = cmd_sender.send(CaptureCommand::Resume).await;
-                    IpcResponse::Ok(ResponseData::Empty)
-                }
-                IpcCommand::StopCapture => {
-                    let _ = cmd_sender.send(CaptureCommand::Stop).await;
-                    IpcResponse::Ok(ResponseData::Empty)
-                }
+                IpcCommand::StartCapture => tell_capture(&cmd_sender, CaptureCommand::Resume).await,
+                // StopCapture ends capture for good: nothing restarts it yet (ROADMAP.md).
+                IpcCommand::StopCapture => tell_capture(&cmd_sender, CaptureCommand::Stop).await,
                 IpcCommand::ForceRebase => {
                     // Trigger an in-process rebase increment for diagnostics/tests
                     iris_core::pipeline::force_increment_rebase_for_test();
@@ -439,7 +525,10 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                     }
                     IpcResponse::Ok(ResponseData::Empty)
                 }
-                _ => IpcResponse::Ok(ResponseData::Empty),
+                other => {
+                    let name = format!("{other:?}");
+                    not_implemented(name.split([' ', '{', '(']).next().unwrap_or("this command"))
+                }
             }
         })
     }
@@ -873,6 +962,7 @@ impl IrisRuntime {
             capture_handle.state_rx.clone(),
             stream_handle.clone(),
             source_label.clone(),
+            capture_handle.device_rx.clone(),
         );
 
         // 6. Spawn services
@@ -1640,7 +1730,8 @@ mod get_status_tests {
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         let ring = stream.ring_buffer.clone();
         let mirror = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut d = IrisDispatcher::new(cmd_tx, ring, mirror, state_rx, stream, "none: no camera found".into());
+        let (_device_tx, device_rx) = tokio::sync::watch::channel(None);
+        let mut d = IrisDispatcher::new(cmd_tx, ring, mirror, state_rx, stream, "none: no camera found".into(), device_rx);
         match d.dispatch(iris_ipc::command::IpcCommand::GetStatus).await {
             IpcResponse::Ok(ResponseData::Status { capture_state, device_name, fps, frame_count, subscriber_count }) => {
                 assert_eq!(device_name, "none: no camera found");
@@ -1654,6 +1745,207 @@ mod get_status_tests {
         match d.dispatch(iris_ipc::command::IpcCommand::GetStatus).await {
             IpcResponse::Ok(ResponseData::Status { capture_state, .. }) => assert_eq!(capture_state, "Capturing"),
             other => panic!("GetStatus answered {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod truthful_answer_tests {
+    use super::{IrisDispatcher, CAPTURE_NOT_RUNNING};
+    use iris_capture::backend::OpenedCamera;
+    use iris_capture::service::{CaptureCommand, CaptureServiceState};
+    use iris_ipc::command::IpcCommand;
+    use iris_ipc::{response::IpcResponse, response::ResponseData, Dispatcher};
+    use std::time::{Duration, Instant};
+    use tokio::sync::{mpsc, watch};
+
+    fn cam(id: &str, name: &str) -> OpenedCamera {
+        OpenedCamera { id: id.into(), name: name.into() }
+    }
+
+    struct Rig {
+        d: IrisDispatcher,
+        device_tx: Option<watch::Sender<Option<OpenedCamera>>>,
+        cmd_rx: Option<mpsc::Receiver<CaptureCommand>>,
+        stream: iris_stream::StreamHandle,
+        /// Held so the capture state and the stream's frame channel stay open.
+        _held: (watch::Sender<CaptureServiceState>, mpsc::Sender<iris_capture::frame::CaptureFrame>),
+    }
+
+    /// A dispatcher over a live stream service, with `open` as the open camera
+    /// and "the first camera found" as the start-up label.
+    fn rig(open: Option<OpenedCamera>) -> Rig {
+        let (state_tx, state_rx) = watch::channel(CaptureServiceState::Capturing);
+        let (frames_tx, frames_rx) = mpsc::channel(4);
+        let (telemetry_tx, _telemetry_rx) = tokio::sync::broadcast::channel(16);
+        let (service, stream) =
+            iris_stream::StreamService::new(frames_rx, telemetry_tx, iris_stream::StreamMode::Pull, 4, 2);
+        tokio::spawn(service.run());
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (device_tx, device_rx) = watch::channel(open);
+        let ring = stream.ring_buffer.clone();
+        let mirror = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d = IrisDispatcher::new(
+            cmd_tx, ring, mirror, state_rx, stream.clone(), "the first camera found".into(), device_rx,
+        );
+        Rig { d, device_tx: Some(device_tx), cmd_rx: Some(cmd_rx), stream, _held: (state_tx, frames_tx) }
+    }
+
+    fn error(resp: IpcResponse) -> (u32, String) {
+        match resp {
+            IpcResponse::Error { code, message } => (code, message),
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ping_reports_how_long_iris_has_run() {
+        let mut r = rig(None);
+        let uptime = |resp| match resp {
+            IpcResponse::Ok(ResponseData::Pong { uptime_ms }) => uptime_ms,
+            other => panic!("Ping answered {other:?}"),
+        };
+        let first = uptime(r.d.dispatch(IpcCommand::Ping).await);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let second = uptime(r.d.dispatch(IpcCommand::Ping).await);
+        assert!(first < 5_000, "a dispatcher made just now reported {first} ms");
+        assert!(second >= first + 35, "40 ms later the uptime went from {first} to {second}");
+    }
+
+    #[tokio::test]
+    async fn select_device_is_ok_only_for_the_open_camera() {
+        let mut r = rig(Some(cam("/dev/video0", "Cam A")));
+        let ok = r.d.dispatch(IpcCommand::SelectDevice { device_id: "/dev/video0".into() }).await;
+        assert_eq!(ok, IpcResponse::Ok(ResponseData::Empty));
+        let (code, why) = error(r.d.dispatch(IpcCommand::SelectDevice { device_id: "/dev/video2".into() }).await);
+        assert_eq!(code, 501);
+        assert!(why.contains("Cam A (/dev/video0)") && why.contains("IRIS_DEVICE=/dev/video2"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn select_device_waits_for_capture_to_open_its_camera() {
+        let mut r = rig(None);
+        let tx = r.device_tx.take().unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            tx.send(Some(cam("/dev/video0", "Cam A"))).unwrap();
+            tokio::time::sleep(Duration::from_secs(10)).await; // keep the sender alive
+        });
+        let ok = r.d.dispatch(IpcCommand::SelectDevice { device_id: "/dev/video0".into() }).await;
+        assert_eq!(ok, IpcResponse::Ok(ResponseData::Empty), "the window asked before capture had opened it");
+    }
+
+    #[tokio::test]
+    async fn select_device_does_not_wait_for_a_capture_that_has_ended() {
+        let mut r = rig(None);
+        drop(r.device_tx.take()); // the capture service has gone
+        let started = Instant::now();
+        let (code, _) = error(r.d.dispatch(IpcCommand::SelectDevice { device_id: "/dev/video0".into() }).await);
+        assert_eq!(code, 503);
+        assert!(started.elapsed() < Duration::from_secs(1), "waited {:?} on an ended capture", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn get_status_names_the_camera_actually_open() {
+        let mut r = rig(Some(cam("/dev/video2", "Cam B")));
+        match r.d.dispatch(IpcCommand::GetStatus).await {
+            IpcResponse::Ok(ResponseData::Status { device_name, .. }) => assert_eq!(device_name, "Cam B"),
+            other => panic!("GetStatus answered {other:?}"),
+        }
+    }
+
+    fn probed(id: &str) -> Result<String, String> {
+        Ok(format!("{{\"probed\":\"{id}\"}}"))
+    }
+    fn busy(_id: &str) -> Result<String, String> {
+        Err("Device or resource busy".into())
+    }
+
+    #[tokio::test]
+    async fn get_device_capabilities_probes_the_open_camera() {
+        let mut r = rig(Some(cam("/dev/video2", "Cam B")));
+        r.d = r.d.with_probe(Some(probed));
+        assert_eq!(
+            r.d.dispatch(IpcCommand::GetDeviceCapabilities).await,
+            IpcResponse::Ok(ResponseData::DeviceCapabilities { capabilities: "{\"probed\":\"/dev/video2\"}".into() })
+        );
+        r.d = r.d.with_probe(Some(busy));
+        let (code, why) = error(r.d.dispatch(IpcCommand::GetDeviceCapabilities).await);
+        assert!(code == 500 && why.contains("Cam B (/dev/video2)") && why.contains("busy"), "{code} {why}");
+        r.d = r.d.with_probe(None);
+        assert_eq!(error(r.d.dispatch(IpcCommand::GetDeviceCapabilities).await).0, 501);
+
+        let mut none_open = rig(None);
+        none_open.d = none_open.d.with_probe(Some(probed));
+        assert_eq!(error(none_open.d.dispatch(IpcCommand::GetDeviceCapabilities).await).0, 503);
+    }
+
+    #[tokio::test]
+    async fn capture_commands_reach_capture_or_say_it_is_not_running() {
+        let mut r = rig(None);
+        let mut rx = r.cmd_rx.take().unwrap();
+        // Control: while capture listens, each command arrives as itself.
+        for (cmd, expect) in [
+            (IpcCommand::StartCapture, "Resume"),
+            (IpcCommand::PauseCapture, "Pause"),
+            (IpcCommand::ResumeCapture, "Resume"),
+            (IpcCommand::SetFps { fps: 15 }, "SetFps(15)"),
+            (IpcCommand::ClearRoi, "SetRoi(None)"),
+            (IpcCommand::StopCapture, "Stop"),
+        ] {
+            assert_eq!(r.d.dispatch(cmd).await, IpcResponse::Ok(ResponseData::Empty));
+            assert_eq!(format!("{:?}", rx.recv().await.unwrap()), expect);
+        }
+        drop(rx); // capture has ended
+        for cmd in [
+            IpcCommand::StartCapture,
+            IpcCommand::StopCapture,
+            IpcCommand::PauseCapture,
+            IpcCommand::ResumeCapture,
+            IpcCommand::SetFps { fps: 15 },
+            IpcCommand::SetRoi { x: 0, y: 0, width: 2, height: 2 },
+            IpcCommand::ClearRoi,
+        ] {
+            let (code, why) = error(r.d.dispatch(cmd).await);
+            assert_eq!((code, why.as_str()), (503, CAPTURE_NOT_RUNNING));
+        }
+    }
+
+    #[tokio::test]
+    async fn get_stream_stats_are_the_stream_services() {
+        let mut r = rig(None);
+        let _sub = r.stream.subscribe().await.unwrap();
+        match r.d.dispatch(IpcCommand::GetStreamStats).await {
+            IpcResponse::Ok(ResponseData::StreamStats { subscriber_count, .. }) => assert_eq!(subscriber_count, 1),
+            other => panic!("GetStreamStats answered {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn commands_that_do_nothing_say_so() {
+        let mut r = rig(Some(cam("/dev/video0", "Cam A")));
+        for cmd in [
+            IpcCommand::Subscribe,
+            IpcCommand::Unsubscribe { subscriber_id: 1 },
+            IpcCommand::SetResolution { width: 640, height: 480 },
+            IpcCommand::SetPixelFormat { format: "mjpeg".into() },
+            IpcCommand::GetConfig,
+            IpcCommand::ReloadConfig,
+            IpcCommand::UpdateConfig { section: "capture".into(), json: "{}".into() },
+            IpcCommand::LoadProfile { name: "p".into() },
+            IpcCommand::SaveProfile { name: "p".into() },
+            IpcCommand::Init { config_path: None },
+            IpcCommand::Shutdown,
+            IpcCommand::DisconnectDevice,
+            IpcCommand::ListControls,
+            IpcCommand::GetControl { control: "brightness".into() },
+            IpcCommand::SetControl { control: "brightness".into(), value: 1 },
+            IpcCommand::ResetControl { control: "brightness".into() },
+        ] {
+            let name = format!("{cmd:?}");
+            let (code, why) = error(r.d.dispatch(cmd).await);
+            assert_eq!(code, 501, "{name}: {why}");
+            assert!(why.ends_with("is not implemented"), "{name}: {why}");
         }
     }
 }
