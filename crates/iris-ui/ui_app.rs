@@ -1,7 +1,7 @@
 ﻿use eframe::egui::{self, CentralPanel, ScrollArea, TopBottomPanel};
 use eframe::egui::{ColorImage, TextureHandle, Key, Color32, Stroke, Rounding};
 use iris_capture::frame::CaptureFrame;
-use iris_capture::service::CaptureHandle;
+use iris_capture::service::{CaptureHandle, CaptureServiceState};
 use iris_ipc::command::IpcCommand;
 use iris_ipc::response::{DeviceEntry, IpcResponse, ResponseData};
 use iris_ipc::IpcHandle;
@@ -14,6 +14,29 @@ use std::sync::{Arc, Mutex};
 /// event, which is far wider than the panel. Wrapped, a single entry ate three
 /// rows and the three-line log showed one event. Truncated with an ellipsis it
 /// stays one line per event, which is the point of showing three.
+/// What the preview says when there is no picture to show, and whether it is a
+/// fault worth stating plainly rather than a transient wait.
+///
+/// The capture service's state was published and read by nothing, so with no
+/// camera the window showed "no frames yet" forever, or, before the operator's
+/// 2026-09-29 ruling, a synthetic grey image that looked like a broken camera.
+pub(crate) fn preview_placeholder(
+    state: &CaptureServiceState,
+    last_frame: Option<(u32, u32)>,
+) -> (String, bool) {
+    match state {
+        CaptureServiceState::Error(e) if e.contains(iris_capture::backend::NO_CAMERA) => (
+            "No camera found.\nConnect a camera, then restart Iris.".to_string(),
+            true,
+        ),
+        CaptureServiceState::Error(e) => (format!("Capture stopped: {e}"), true),
+        _ => match last_frame {
+            Some((w, h)) => (format!("waiting for frames — last was {w}x{h}"), false),
+            None => ("no frames yet".to_string(), false),
+        },
+    }
+}
+
 pub fn truncate_log_line(line: &str) -> String {
     const MAX: usize = 72;
     // Drop the date, keep the time: the date is the same for every line in a
@@ -286,6 +309,8 @@ pub struct IrisApp {
     /// the window draws — the reason to flip is that a model cannot read
     /// mirrored text.
     mirror: Arc<std::sync::atomic::AtomicBool>,
+    /// The capture service's state, so the preview can say why it is empty.
+    capture_state: tokio::sync::watch::Receiver<CaptureServiceState>,
 }
 
 impl IrisApp {
@@ -319,6 +344,7 @@ impl IrisApp {
             controls_error: Arc::new(Mutex::new(None)),
             control,
             mirror,
+            capture_state: capture.state_rx,
         };
 
         // fetch initial device list and auto-select the first device if present
@@ -1022,14 +1048,14 @@ impl eframe::App for IrisApp {
                 }
             } else {
                 ui.centered_and_justified(|ui| {
-                    let msg = match self.last_frame_info.lock() {
-                        Ok(lf) => match *lf {
-                            Some((w, h)) => format!("waiting for frames — last was {w}x{h}"),
-                            None => "no frames yet".to_string(),
-                        },
-                        Err(_) => "no frames yet".to_string(),
-                    };
-                    ui.label(egui::RichText::new(msg).weak().italics());
+                    let last = self.last_frame_info.lock().ok().and_then(|lf| *lf);
+                    let state = self.capture_state.borrow().clone();
+                    let (msg, fault) = preview_placeholder(&state, last);
+                    if fault {
+                        ui.label(egui::RichText::new(msg).size(22.0).strong());
+                    } else {
+                        ui.label(egui::RichText::new(msg).weak().italics());
+                    }
                 });
             }
         });
@@ -1342,5 +1368,41 @@ mod mirror_rgba_tests {
         let mut px = vec![1, 2, 3, 4];
         mirror_rgba(&mut px, 8, 8);
         assert_eq!(px, vec![1, 2, 3, 4]);
+    }
+}
+
+#[cfg(test)]
+mod preview_placeholder_tests {
+    use super::preview_placeholder;
+    use iris_capture::service::CaptureServiceState;
+
+    #[test]
+    fn no_camera_is_said_in_the_window_as_a_fault() {
+        let state = CaptureServiceState::Error(format!(
+            "start failed: device error: {}",
+            iris_capture::backend::NO_CAMERA
+        ));
+        let (msg, fault) = preview_placeholder(&state, None);
+        assert!(msg.starts_with("No camera found."), "{msg}");
+        assert!(fault, "a missing camera must be stated plainly, not greyed out");
+    }
+
+    #[test]
+    fn any_other_capture_failure_is_named_too() {
+        let state = CaptureServiceState::Error("start failed: device error: busy".into());
+        let (msg, fault) = preview_placeholder(&state, Some((640, 480)));
+        assert_eq!(msg, "Capture stopped: start failed: device error: busy");
+        assert!(fault);
+    }
+
+    #[test]
+    fn a_running_capture_still_just_waits() {
+        for state in [CaptureServiceState::Idle, CaptureServiceState::Capturing, CaptureServiceState::Paused] {
+            assert_eq!(preview_placeholder(&state, None), ("no frames yet".to_string(), false));
+            assert_eq!(
+                preview_placeholder(&state, Some((640, 480))),
+                ("waiting for frames — last was 640x480".to_string(), false)
+            );
+        }
     }
 }

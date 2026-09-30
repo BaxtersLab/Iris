@@ -57,6 +57,61 @@ pub struct IrisRuntime {
     _capture_telemetry_keepalive: tokio::sync::broadcast::Receiver<CaptureTelemetryEvent>,
 }
 
+/// What `ListDevices` offers, given what enumeration found.
+///
+/// With no camera this used to offer the mock's "Mock Camera". The window then
+/// selected it, started capture, and showed flat grey frames as though they
+/// were a picture, and agents received the same frames as real ones (operator
+/// ruling, 2026-09-29). Now: real cameras if there are any; the synthetic
+/// device only when `IRIS_BACKEND=mock` asked for it; otherwise nothing.
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) enum Offer<T> {
+    Real(Vec<T>),
+    Synthetic,
+    Nothing,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn offer<T, E>(found: Result<Vec<T>, E>, synthetic_requested: bool) -> Offer<T> {
+    match found {
+        Ok(list) if !list.is_empty() => Offer::Real(list),
+        _ if synthetic_requested => Offer::Synthetic,
+        _ => Offer::Nothing,
+    }
+}
+
+/// `IRIS_BACKEND=mock`: the one way to ask for the synthetic camera.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn synthetic_requested() -> bool {
+    std::env::var("IRIS_BACKEND")
+        .map(|v| v.eq_ignore_ascii_case("mock"))
+        .unwrap_or(false)
+}
+
+/// The capture backend on Linux with no `IRIS_BACKEND` set: the camera if there
+/// is one, otherwise `NoCameraBackend`, never the synthetic mock.
+#[cfg(target_os = "linux")]
+pub(crate) fn default_linux_backend(
+    have_camera: bool,
+    cfg: CaptureConfig,
+) -> Box<dyn iris_capture::backend::CaptureBackend + Send + Sync> {
+    if have_camera {
+        println!("Capture backend: v4l2 (a camera is present)");
+        Box::new(iris_capture::backend::UvcCaptureBackend::new(
+            iris_hal::v4l2_backend::v4l2::V4l2UvcBackend::new(),
+            cfg,
+        ))
+    } else {
+        println!(
+            "Capture backend: none, {} (no /dev/video*). The window says so, and \
+             no test image is sent anywhere; IRIS_BACKEND=mock gives the synthetic one.",
+            iris_capture::backend::NO_CAMERA
+        );
+        Box::new(iris_capture::backend::NoCameraBackend)
+    }
+}
+
 /// Minimal dispatcher implemented inside `iris-ui` that implements the `iris-ipc::Dispatcher` trait.
 pub struct IrisDispatcher {
     capture_cmd: MpscSender<CaptureCommand>,
@@ -127,24 +182,29 @@ impl iris_ipc::Dispatcher for IrisDispatcher {
                             }
                         }
                     };
-                    // On Linux, try V4L2 enumeration first for real USB cameras;
-                    // fall back to the mock backend if V4L2 errors or finds nothing.
+                    // On Linux, list the V4L2 cameras. With none, the list is
+                    // EMPTY (the window then says "No camera found"); the
+                    // synthetic device is offered only when IRIS_BACKEND=mock
+                    // asked for it. See `offer`.
                     #[cfg(target_os = "linux")]
                     let raw_list = {
                         let v4l2_result =
                             iris_hal::v4l2_backend::v4l2::V4l2UvcBackend::enumerate_sync();
-                        match v4l2_result {
-                            Ok(list) if !list.is_empty() => {
+                        if let Err(e) = &v4l2_result {
+                            println!("ListDevices: V4L2 error ({:?})", e);
+                        }
+                        match offer(v4l2_result, synthetic_requested()) {
+                            Offer::Real(list) => {
                                 println!("ListDevices: V4L2 found {} device(s)", list.len());
                                 list
                             }
-                            Ok(_) => {
-                                println!("ListDevices: V4L2 returned 0 devices, falling back to mock");
+                            Offer::Synthetic => {
+                                println!("ListDevices: IRIS_BACKEND=mock, offering the synthetic device");
                                 MockUvcBackend::new().enumerate_devices().await.unwrap_or_default()
                             }
-                            Err(e) => {
-                                println!("ListDevices: V4L2 error ({:?}), falling back to mock", e);
-                                MockUvcBackend::new().enumerate_devices().await.unwrap_or_default()
+                            Offer::Nothing => {
+                                println!("ListDevices: {}", iris_capture::backend::NO_CAMERA);
+                                Vec::new()
                             }
                         }
                     };
@@ -417,7 +477,9 @@ impl IrisRuntime {
         };
         // Select capture backend at runtime. `IRIS_BACKEND` forces a specific
         // one; with nothing set, Iris uses the camera if there is one and says
-        // so. It falls back to the mock only when no camera is present.
+        // so. With no camera it uses `NoCameraBackend` on Linux and says so
+        // (`default_linux_backend`); the Windows branch below still falls back
+        // to the mock, a follow-up for the Windows fork.
         // Increase capture telemetry capacity to reduce lag/dropped messages
         // during high-frequency or bursty capture periods in tests.
         let (capture_telemetry_tx, _capture_telemetry_rx) = broadcast::channel(4096);
@@ -524,21 +586,7 @@ impl IrisRuntime {
                         V4l2UvcBackend::enumerate_sync(),
                         Ok(ref devices) if !devices.is_empty()
                     );
-                    if have_camera {
-                        println!("Capture backend: v4l2 (a camera is present)");
-                        Box::new(iris_capture::backend::UvcCaptureBackend::new(
-                            V4l2UvcBackend::new(),
-                            capture_cfg.clone(),
-                        ))
-                    } else {
-                        println!(
-                            "Capture backend: mock — no /dev/video* camera found. \
-                             The preview will be a flat grey test image, not a fault."
-                        );
-                        Box::new(iris_capture::backend::MockCaptureBackend::new(
-                            capture_cfg.clone(),
-                        ))
-                    }
+                    default_linux_backend(have_camera, capture_cfg.clone())
                 }
                 #[cfg(windows)]
                 {
@@ -1349,5 +1397,55 @@ impl IrisRuntime {
             _capture_telemetry_tx: capture_telemetry_tx.clone(),
             _capture_telemetry_keepalive: capture_keepalive,
         })
+    }
+}
+
+#[cfg(test)]
+mod no_camera_tests {
+    use super::{offer, Offer};
+
+    // With no camera, ListDevices offered the mock's "Mock Camera", the window
+    // selected it, and flat grey frames reached the window and agents alike.
+
+    #[test]
+    fn no_camera_offers_nothing() {
+        assert!(matches!(offer::<u8, ()>(Ok(vec![]), false), Offer::Nothing));
+        assert!(matches!(offer::<u8, &str>(Err("v4l2 failed"), false), Offer::Nothing));
+    }
+
+    #[test]
+    fn the_synthetic_device_only_when_asked_for() {
+        assert!(matches!(offer::<u8, ()>(Ok(vec![]), true), Offer::Synthetic));
+        assert!(matches!(offer::<u8, &str>(Err("v4l2 failed"), true), Offer::Synthetic));
+    }
+
+    #[test]
+    fn real_cameras_are_offered_whatever_was_asked() {
+        for synthetic in [false, true] {
+            match offer::<u8, ()>(Ok(vec![7]), synthetic) {
+                Offer::Real(list) => assert_eq!(list, vec![7]),
+                other => panic!("a real camera must be offered, got {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn with_no_camera_the_default_backend_is_not_the_mock() {
+        use iris_capture::backend::{CaptureConfig, DropPolicy, NO_CAMERA};
+        let cfg = CaptureConfig {
+            width: 8,
+            height: 8,
+            target_fps: 30,
+            format: iris_hal::device::PixelFormat::Rgb24,
+            max_queue_depth: 4,
+            drop_policy: DropPolicy::Oldest,
+            roi: None,
+        };
+        let mut backend = super::default_linux_backend(false, cfg);
+        // The mock starts and then yields grey frames; this must refuse, naming why.
+        let err = backend.start().await.expect_err("no camera must not start a capture");
+        assert!(err.to_string().contains(NO_CAMERA), "{err}");
+        assert!(backend.next_frame().await.is_err(), "no camera must yield no frame");
     }
 }

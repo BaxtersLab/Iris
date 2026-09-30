@@ -101,6 +101,39 @@ impl CaptureBackend for MockCaptureBackend {
     }
 }
 
+/// The reason `NoCameraBackend` gives. The window matches on it to say
+/// "No camera found" instead of showing an empty preview.
+pub const NO_CAMERA: &str = "no camera found";
+
+/// The backend when there is no camera: it never produces a frame. `start`
+/// fails with `NO_CAMERA`, so the capture service reports it and stops, the
+/// window says so, and an agent asking for a frame is told there is none.
+///
+/// It replaced falling back to `MockCaptureBackend` when no camera was found.
+/// Its flat grey frames looked like a broken camera in the window, and reached
+/// agents as if they were real pictures (operator ruling, 2026-09-29). The mock
+/// is still there, explicitly, as `IRIS_BACKEND=mock`.
+pub struct NoCameraBackend;
+
+#[async_trait]
+impl CaptureBackend for NoCameraBackend {
+    async fn start(&mut self) -> IrisResult<()> {
+        Err(iris_core::error::IrisError::Device(NO_CAMERA.into()))
+    }
+
+    async fn stop(&mut self) -> IrisResult<()> {
+        Ok(())
+    }
+
+    async fn next_frame(&mut self) -> IrisResult<CaptureFrame> {
+        Err(iris_core::error::IrisError::Device(NO_CAMERA.into()))
+    }
+
+    fn is_capturing(&self) -> bool {
+        false
+    }
+}
+
 // Allow boxed dynamic backends to be used where a concrete `B: CaptureBackend` is
 // expected by forwarding calls to the inner boxed implementor.
 #[async_trait]

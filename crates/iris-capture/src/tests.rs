@@ -648,3 +648,59 @@ mod mjpeg_hardware_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod no_camera_tests {
+    // --- No camera --------------------------------------------------------------
+    // With no camera, Iris used to fall back to MockCaptureBackend: flat grey
+    // frames, shown in the window and handed to agents as if they were pictures.
+    // NoCameraBackend produces nothing and says why (operator ruling 2026-09-29).
+
+    #[tokio::test]
+    async fn no_camera_backend_never_produces_a_frame() {
+        use crate::backend::{CaptureBackend, NoCameraBackend, NO_CAMERA};
+        let mut b = NoCameraBackend;
+        let start = b.start().await.expect_err("a backend with no camera must not start");
+        assert!(start.to_string().contains(NO_CAMERA), "start error: {start}");
+        let frame = b.next_frame().await.expect_err("a backend with no camera must not yield a frame");
+        assert!(frame.to_string().contains(NO_CAMERA), "frame error: {frame}");
+        assert!(!b.is_capturing());
+    }
+
+    #[tokio::test]
+    async fn a_service_with_no_camera_says_so_and_sends_nothing() {
+        use crate::backend::{CaptureConfig, DropPolicy, NoCameraBackend, NO_CAMERA};
+        use crate::service::{CaptureCommand, CaptureService, CaptureServiceState};
+        use iris_hal::device::PixelFormat;
+        use tokio::sync::broadcast;
+        use tokio::time::{timeout, Duration};
+        let cfg = CaptureConfig {
+            width: 8,
+            height: 8,
+            target_fps: 30,
+            format: PixelFormat::Rgb24,
+            max_queue_depth: 4,
+            drop_policy: DropPolicy::Oldest,
+            roi: None,
+        };
+        let (tx, _rx) = broadcast::channel(8);
+        let (svc, handle) = CaptureService::new(NoCameraBackend, cfg, tx);
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
+        let svc_task = tokio::spawn(svc.run(cmd_rx));
+        // Asking it to capture changes nothing: there is nothing to capture.
+        let _ = cmd_tx.send(CaptureCommand::Resume).await;
+        timeout(Duration::from_secs(5), svc_task)
+            .await
+            .expect("the service must stop, not wait for frames that cannot come")
+            .unwrap();
+        match handle.state() {
+            CaptureServiceState::Error(e) => assert!(e.contains(NO_CAMERA), "state: {e}"),
+            other => panic!("state should name the missing camera, was {other:?}"),
+        }
+        let mut frame_rx = handle.frame_rx;
+        assert!(
+            timeout(Duration::from_millis(300), frame_rx.recv()).await.map(|f| f.is_none()).unwrap_or(true),
+            "a frame arrived from a machine with no camera"
+        );
+    }
+}
