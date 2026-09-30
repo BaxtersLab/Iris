@@ -36,12 +36,24 @@ pub struct CaptureConfig {
     pub roi: Option<Roi>,
 }
 
+/// The camera a backend has open: the id `ListDevices` reports, and its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedCamera {
+    pub id: String,
+    pub name: String,
+}
+
 #[async_trait]
 pub trait CaptureBackend: Send + Sync {
     async fn start(&mut self) -> IrisResult<()>;
     async fn stop(&mut self) -> IrisResult<()>;
     async fn next_frame(&mut self) -> IrisResult<CaptureFrame>;
     fn is_capturing(&self) -> bool;
+    /// The camera this backend has open, if it opens one. A synthetic source,
+    /// a screen grabber and "no camera" have none.
+    fn device(&self) -> Option<OpenedCamera> {
+        None
+    }
 }
 
 pub struct MockCaptureBackend {
@@ -153,6 +165,10 @@ impl<T: CaptureBackend + ?Sized + Send + Sync> CaptureBackend for Box<T> {
     fn is_capturing(&self) -> bool {
         (**self).is_capturing()
     }
+
+    fn device(&self) -> Option<OpenedCamera> {
+        (**self).device()
+    }
 }
 
 /// Adapter: drive any `iris_hal::backend::UvcBackend` (WMF on Windows, V4L2 on
@@ -168,6 +184,8 @@ impl<T: CaptureBackend + ?Sized + Send + Sync> CaptureBackend for Box<T> {
 pub struct UvcCaptureBackend<U: iris_hal::backend::UvcBackend> {
     uvc: U,
     device: Option<iris_hal::device::DeviceId>,
+    /// `device`, named, for `CaptureBackend::device`.
+    opened: Option<OpenedCamera>,
     capturing: bool,
     sequence: u64,
     pub config: CaptureConfig,
@@ -178,6 +196,7 @@ impl<U: iris_hal::backend::UvcBackend> UvcCaptureBackend<U> {
         UvcCaptureBackend {
             uvc,
             device: None,
+            opened: None,
             capturing: false,
             sequence: 0,
             config,
@@ -265,6 +284,7 @@ impl<U: iris_hal::backend::UvcBackend> CaptureBackend for UvcCaptureBackend<U> {
                 }
             }
         }
+        self.opened = Some(OpenedCamera { id: chosen.id.0.clone(), name: chosen.name.clone() });
         self.device = Some(chosen.id);
         self.capturing = true;
         self.sequence = 0;
@@ -276,6 +296,7 @@ impl<U: iris_hal::backend::UvcBackend> CaptureBackend for UvcCaptureBackend<U> {
             // Best effort: the device may already be gone (unplug).
             let _ = self.uvc.close_device(&id).await;
         }
+        self.opened = None;
         self.capturing = false;
         Ok(())
     }
@@ -303,5 +324,9 @@ impl<U: iris_hal::backend::UvcBackend> CaptureBackend for UvcCaptureBackend<U> {
 
     fn is_capturing(&self) -> bool {
         self.capturing
+    }
+
+    fn device(&self) -> Option<OpenedCamera> {
+        self.opened.clone()
     }
 }

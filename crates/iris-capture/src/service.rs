@@ -1,4 +1,4 @@
-use crate::backend::{CaptureBackend, CaptureConfig, DropPolicy};
+use crate::backend::{CaptureBackend, CaptureConfig, DropPolicy, OpenedCamera};
 use crate::frame::{CaptureFrame, Roi};
 use crate::telemetry::CaptureTelemetry;
 use chrono::Utc;
@@ -24,6 +24,9 @@ pub struct CaptureService<B: CaptureBackend + 'static> {
     /// Sender used by forwarder to deliver frames to consumers.
     telemetry_tx: broadcast::Sender<CaptureTelemetry>,
     state_tx: watch::Sender<CaptureServiceState>,
+    /// The camera the backend opened, published once it has, and `None` again
+    /// when capture ends.
+    device_tx: watch::Sender<Option<OpenedCamera>>,
     frame_count: Arc<AtomicU64>,
     drop_count: Arc<AtomicU64>,
     roi: Option<Roi>,
@@ -35,6 +38,9 @@ pub struct CaptureHandle {
     pub frame_rx: mpsc::Receiver<CaptureFrame>,
     cmd_tx: mpsc::Sender<CaptureCommand>,
     pub state_rx: watch::Receiver<CaptureServiceState>,
+    /// The camera being captured from; `None` before it opens and after capture
+    /// ends. The window and the IPC dispatcher answer from this, not a guess.
+    pub device_rx: watch::Receiver<Option<OpenedCamera>>,
     pub frame_count: Arc<AtomicU64>,
     pub drop_count: Arc<AtomicU64>,
 }
@@ -95,6 +101,7 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
         let (out_tx, frame_rx) = mpsc::channel(config.max_queue_depth);
         let (cmd_tx, _cmd_rx) = mpsc::channel(8);
         let (state_tx, state_rx) = watch::channel(CaptureServiceState::Idle);
+        let (device_tx, device_rx) = watch::channel(None);
         let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(config.max_queue_depth)));
         let notify = Arc::new(Notify::new());
         let svc = CaptureService {
@@ -102,6 +109,7 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
             config: config.clone(),
             telemetry_tx,
             state_tx: state_tx.clone(),
+            device_tx,
             frame_count: Arc::new(AtomicU64::new(0)),
             drop_count: Arc::new(AtomicU64::new(0)),
             roi: config.roi,
@@ -112,6 +120,7 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
             frame_rx,
             cmd_tx,
             state_rx,
+            device_rx,
             frame_count: svc.frame_count.clone(),
             drop_count: svc.drop_count.clone(),
         };
@@ -156,6 +165,7 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
                 .ok();
             return;
         }
+        self.device_tx.send(self.backend.device()).ok();
         self.state_tx.send(CaptureServiceState::Capturing).ok();
 
         let mut frame_errors: u64 = 0;
@@ -266,6 +276,9 @@ impl<B: CaptureBackend + Send + 'static> CaptureService<B> {
                 }
             }
         }
+        // A receiver keeps the last value after the sender is gone, so say so:
+        // with this left out, a stopped capture still named its camera.
+        self.device_tx.send(None).ok();
     }
 }
 

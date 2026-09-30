@@ -703,4 +703,79 @@ mod no_camera_tests {
             "a frame arrived from a machine with no camera"
         );
     }
+
+}
+
+#[cfg(test)]
+mod open_camera_tests {
+    use crate::backend::{CaptureBackend, CaptureConfig, DropPolicy};
+    use crate::service::{CaptureCommand, CaptureService};
+    use iris_hal::device::PixelFormat;
+    use tokio::sync::broadcast;
+    use tokio::time::{timeout, Duration};
+    // --- which camera is open ----------------------------------------------
+    // Nothing reported which device capture had opened, so the window marked
+    // whichever camera it had asked for (the IPC dispatcher ignored the request)
+    // and GetStatus named the first camera found, even when IRIS_DEVICE chose
+    // another.
+
+    fn tiny_cfg() -> CaptureConfig {
+        CaptureConfig {
+            width: 8,
+            height: 8,
+            target_fps: 30,
+            format: PixelFormat::Rgb24,
+            max_queue_depth: 4,
+            drop_policy: DropPolicy::Oldest,
+            roi: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_uvc_backend_names_the_camera_it_opened_until_it_stops() {
+        use crate::backend::{OpenedCamera, UvcCaptureBackend};
+        let mut backend = UvcCaptureBackend::new(iris_hal::backend::MockUvcBackend::new(), tiny_cfg());
+        assert_eq!(backend.device(), None, "nothing is open before start");
+        backend.start().await.unwrap();
+        let mock0 = OpenedCamera { id: "mock-0".into(), name: "Mock Camera".into() };
+        assert_eq!(backend.device(), Some(mock0.clone()));
+        // Boxed, as the application holds every backend.
+        let boxed: Box<dyn CaptureBackend + Send + Sync> = Box::new(backend);
+        assert_eq!(boxed.device(), Some(mock0));
+        let mut boxed = boxed;
+        boxed.stop().await.unwrap();
+        assert_eq!(boxed.device(), None, "a stopped backend has nothing open");
+    }
+
+    #[tokio::test]
+    async fn the_service_publishes_the_open_camera_and_withdraws_it_on_stop() {
+        use crate::backend::{OpenedCamera, UvcCaptureBackend};
+        let backend = UvcCaptureBackend::new(iris_hal::backend::MockUvcBackend::new(), tiny_cfg());
+        let (tx, _rx) = broadcast::channel(64);
+        let (svc, handle) = CaptureService::new(backend, tiny_cfg(), tx);
+        let mut device = handle.device_rx.clone();
+        assert_eq!(*device.borrow(), None);
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
+        let svc_task = tokio::spawn(svc.run(cmd_rx));
+        let opened = timeout(Duration::from_secs(5), device.wait_for(|d| d.is_some()))
+            .await
+            .expect("the open camera was never published")
+            .unwrap()
+            .clone();
+        assert_eq!(opened, Some(OpenedCamera { id: "mock-0".into(), name: "Mock Camera".into() }));
+        cmd_tx.send(CaptureCommand::Stop).await.unwrap();
+        timeout(Duration::from_secs(5), svc_task).await.expect("Stop must end the service").unwrap();
+        // Read after the service has gone: the receiver keeps the last value.
+        assert_eq!(*handle.device_rx.borrow(), None, "a stopped capture still names its camera");
+    }
+
+    #[tokio::test]
+    async fn no_camera_is_ever_published_when_there_is_none() {
+        use crate::backend::NoCameraBackend;
+        let (tx, _rx) = broadcast::channel(8);
+        let (svc, handle) = CaptureService::new(NoCameraBackend, tiny_cfg(), tx);
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
+        timeout(Duration::from_secs(5), tokio::spawn(svc.run(cmd_rx))).await.unwrap().unwrap();
+        assert_eq!(*handle.device_rx.borrow(), None);
+    }
 }
